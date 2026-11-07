@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <script>
+    // Pick panel colours before first paint: saved choice, or follow the office clock (dark at night).
+    (function () {
+      let panels = 'auto', mode = 'real', hour = null;
+      try { panels = localStorage.getItem('office-panels') || 'auto'; mode = localStorage.getItem('office-time-mode') || 'real'; hour = parseFloat(localStorage.getItem('office-hour')); } catch (e) {}
+      if (mode === 'real' || isNaN(hour)) { const d = new Date(); hour = d.getHours() + d.getMinutes() / 60; }
+      const night = hour < 6 || hour >= 19.3;
+      document.documentElement.dataset.theme = panels === 'auto' ? (night ? 'dark' : 'light') : panels;
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Agent Office</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mali:wght@600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/vendor/three/build/three.module.js",
+        "three/addons/": "/vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="scene" aria-label="3D view of the agent office"></div>
+
+  <div class="hud">
+    <header class="topbar panel">
+      <button class="icon-btn only-narrow" id="toggle-left" aria-label="Show sessions">☰</button>
+      <div class="brand">
+        <svg class="brand-mark" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20s-7-4.4-9.3-8.8A5.2 5.2 0 0 1 12 6.3a5.2 5.2 0 0 1 9.3 4.9C19 15.6 12 20 12 20z"/></svg>
+        <span class="brand-name">Agent Office</span>
+      </div>
+      <div class="stats" id="stats"></div>
+      <div class="limits" id="limits" title="Claude usage limits, from the Agent Office statusline"></div>
+      <div class="conn" id="conn"><span class="dot"></span><span class="conn-text">Connecting…</span></div>
+      <button class="time-btn" id="time-btn" type="button" aria-expanded="false" aria-controls="time-panel" aria-label="Time of day and display settings">
+        <span class="time-ic" id="time-ic" aria-hidden="true">☀️</span><b id="time-clock">10:00</b>
+      </button>
+      <button class="icon-btn only-narrow" id="toggle-right" aria-label="Show detail">ⓘ</button>
+    </header>
+
+    <aside class="panel side left" id="left">
+      <div class="panel-head">
+        <h2>Current sessions</h2>
+        <span class="muted small" id="session-count"></span>
+      </div>
+      <div class="scroll" id="session-list"></div>
+    </aside>
+
+    <aside class="panel side right" id="right">
+      <div id="detail"></div>
+    </aside>
+
+    <section class="panel dock" id="dock">
+      <div class="dock-head">
+        <div class="tabs" role="tablist">
+          <button role="tab" data-dock="ask" class="tab">Ask Input <span class="badge" id="ask-count" hidden></span></button>
+          <button role="tab" data-dock="assign" class="tab">Minju's Desk</button>
+          <button role="tab" data-dock="feed" class="tab">Live feed</button>
+          <button role="tab" data-dock="grok" class="tab">Grok Bots <span class="badge" id="grok-count" hidden></span></button>
+        </div>
+        <button class="icon-btn" id="dock-collapse" aria-label="Collapse panel">▾</button>
+      </div>
+      <div class="dock-body">
+        <div data-pane="ask" class="scroll" id="ask-pane"></div>
+        <div data-pane="assign" id="assign-pane" class="scroll">
+          <form id="assign-form" class="assign">
+            <label class="field">
+              <span>Assign to</span>
+              <select id="assign-target" required></select>
+            </label>
+            <label class="field">
+              <span>Skill</span>
+              <select id="assign-skill"><option value="">No skill</option></select>
+            </label>
+            <label class="field grow">
+              <span>Task</span>
+              <textarea id="assign-text" rows="2" maxlength="4000" placeholder="e.g. Run the test suite and fix anything that fails"></textarea>
+            </label>
+            <div class="assign-actions">
+              <button type="submit" class="btn primary">Send to desk</button>
+              <label class="switch" title="Keep this session's turn open after it finishes so a task can be delivered immediately">
+                <input type="checkbox" id="assign-standby">
+                <span>Standby</span>
+              </label>
+            </div>
+          </form>
+          <p class="hint" id="assign-hint">A task reaches the session when its current turn finishes. Turn on <b>Standby</b> to have an idle session wait at its desk for the next task.</p>
+          <div id="assign-guide"></div>
+        </div>
+        <div data-pane="feed" class="scroll" id="feed-pane"></div>
+        <div data-pane="grok" class="scroll" id="grok-pane"></div>
+      </div>
+    </section>
+
+    <section class="panel time-panel" id="time-panel" hidden aria-label="Atmosphere">
+      <div class="tp-head">
+        <div>
+          <p class="tp-kicker">Atmosphere</p>
+          <p class="tp-now"><output id="tp-clock" for="tp-hour">10:00</output> <span id="tp-period">Morning</span></p>
+        </div>
+        <button class="icon-btn" id="tp-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="presets" role="group" aria-label="Time presets">
+        <button type="button" data-hour="6.6"><span aria-hidden="true">🌅</span>Sunrise</button>
+        <button type="button" data-hour="10"><span aria-hidden="true">☀️</span>Morning</button>
+        <button type="button" data-hour="14"><span aria-hidden="true">🌤️</span>Afternoon</button>
+        <button type="button" data-hour="18.3"><span aria-hidden="true">🌇</span>Sunset</button>
+        <button type="button" data-hour="22.5"><span aria-hidden="true">🌙</span>Night</button>
+      </div>
+      <input type="range" id="tp-hour" min="0" max="24" step="0.05" value="10" aria-label="Hour of day">
+      <div class="tod" aria-hidden="true"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+      <p class="sec-h">Clock</p>
+      <div class="seg" role="group" aria-label="Clock mode" id="tp-mode">
+        <button type="button" data-mode="real">Real time</button>
+        <button type="button" data-mode="manual">Manual</button>
+        <button type="button" data-mode="lapse">Time-lapse</button>
+      </div>
+      <p class="sec-h">Panels</p>
+      <div class="seg" role="group" aria-label="Panel colours" id="tp-panels">
+        <button type="button" data-panels="auto">Follow time</button>
+        <button type="button" data-panels="light">Light</button>
+        <button type="button" data-panels="dark">Dark</button>
+      </div>
+      <p class="sec-h">Quality</p>
+      <div class="seg" role="group" aria-label="Render quality" id="tp-quality">
+        <button type="button" data-quality="standard">Standard</button>
+        <button type="button" data-quality="ultra">Ultra</button>
+      </div>
+      <p class="tp-note" id="tp-note"></p>
+    </section>
+
+    <section class="panel workspace" id="workspace" hidden aria-label="Workspace">
+      <div class="ws-head">
+        <div class="ws-title"><h3 id="ws-title">Workspace</h3><span class="muted small mono" id="ws-sub"></span></div>
+        <div class="tabs" role="tablist">
+          <button role="tab" class="tab" data-ws="files">Files</button>
+          <button role="tab" class="tab" data-ws="git">Changes <span class="badge soft" id="ws-git-count" hidden></span></button>
+          <button role="tab" class="tab" data-ws="skills">Skills</button>
+          <button role="tab" class="tab" data-ws="plugins">Plugins</button>
+          <button role="tab" class="tab" data-ws="mcp">MCP</button>
+        </div>
+        <button class="icon-btn" id="ws-close" aria-label="Close workspace">✕</button>
+      </div>
+      <div class="ws-body" id="ws-body"></div>
+    </section>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <div class="gate" id="gate" hidden>
+    <div class="gate-card panel">
+      <h1>Agent Office</h1>
+      <p>Open the link printed by the bridge (<code>npm start</code>), or paste the token from <code>~/.agent-office/token</code>.</p>
+      <form id="gate-form">
+        <input id="gate-token" type="password" placeholder="Token" autocomplete="off" required>
+        <button class="btn primary" type="submit">Enter office</button>
+      </form>
+    </div>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

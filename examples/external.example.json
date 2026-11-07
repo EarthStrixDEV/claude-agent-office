@@ -1,0 +1,15 @@
+{
+  "grok": {
+    "name": "Grok Bot",
+    "routines": [
+      {
+        "id": "morning-brief",
+        "name": "Morning brief",
+        "url": "PASTE the routine's webhook URL from its Webhook section",
+        "key": "PASTE the routine's webhook key",
+        "keyHeader": "Authorization",
+        "keyPrefix": "Bearer "
+      }
+    ]
+  }
+}

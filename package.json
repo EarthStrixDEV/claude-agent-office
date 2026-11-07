@@ -1,0 +1,17 @@
+{
+  "name": "agent-office",
+  "version": "0.1.0",
+  "private": true,
+  "description": "3D office dashboard for Claude Code sessions, fed by Claude Code HTTP hooks",
+  "type": "module",
+  "scripts": {
+    "start": "node bridge/server.mjs",
+    "mock": "node scripts/mock.mjs",
+    "hooks:install": "node scripts/install-hooks.mjs",
+    "hooks:uninstall": "node scripts/install-hooks.mjs --uninstall"
+  },
+  "dependencies": {
+    "three": "0.170.0"
+  },
+  "engines": { "node": ">=18" }
+}
