@@ -63,6 +63,20 @@ npm run hooks:uninstall
 
 `?timescale=3` in the URL speeds up walking and physics. It's handy for demos.
 
+## Workspace
+
+Open it from a session's detail panel (🗂 or **Open workspace**), or click the **Skill Library** bookcase next to Minju's desk.
+
+| Tab | What it does |
+|---|---|
+| **Files** | Read-only explorer of the session's folder. Files the agent touched are marked **E** (edited), **W** (written) and **R** (read). `.env`, keys and credential files are never shown, and `.git` isn't browsable. |
+| **Changes** | Git status and diffs. Stage or unstage file by file, commit what's staged, or ask the agent to commit. **Branches**: switch, or create one; you're warned if the agent is working in that folder. Push and discard are left out on purpose. |
+| **Skills** | Every skill the session can use (project, personal, plugin, plus legacy `.claude/commands`), with a **Skill Guide Block**: what it does, when to use it, how to run it, its arguments, and the SKILL.md instructions. |
+| **Plugins** | Marketplace browser for `claude-plugins-official` and any GitHub marketplace you add (`owner/repo`). It shows what's installed (from `enabledPlugins`), the install command to copy, and **Install now**, which runs `claude plugin install` after a confirmation. |
+| **MCP** | MCP servers by scope (local, project `.mcp.json` with its approval state, user, plugin), with endpoints, env and header *names* only (values stay hidden), tool calls this session, and `claude mcp` commands to copy. claude.ai connectors the agent used appear under *seen in this session*; manage them at claude.ai/customize/connectors. |
+
+**Skill-driven work.** On Minju's desk, pick a **Skill** with the task: the agent is told to load it with the Skill tool, and a compact guide shows what it expects. Whenever an agent uses a skill (the Skill tool, or a `/command` you type), its card and desk show 🧩 and the agent walks to the Skill Library to grab a book before getting back to work.
+
 ## What each panel reads
 
 | Panel | Hook events |
@@ -75,6 +89,7 @@ npm run hooks:uninstall
 | Status | latest of `PreToolUse`, `PostToolUseFailure`, `Notification`, `StopFailure` |
 | Model / effort | `SessionStart.model`, `effort.level` on tool events, the statusline JSON (and, as a fallback, the newest model named in the transcript) |
 | Permission mode | `permission_mode`, present on every event |
+| Skills / files / MCP use | `PreToolUse` for the `Skill` tool, `Read`/`Edit`/`Write`, and `mcp__*` tools; `UserPromptSubmit` for `/commands` |
 | 5-hour / weekly limits | `rate_limits.five_hour` / `seven_day` from the statusline JSON (claude.ai Pro, Max and Ultra plans, after the first reply in a session) |
 | Ask Input | `PermissionRequest`: the bridge holds the request until you click |
 

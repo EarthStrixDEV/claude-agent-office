@@ -432,7 +432,7 @@ export function initWorkspace(ctx) {
       const body = (v.diff || '').split('\n').map((l) => {
         const cls = /^(\+\+\+|---|diff |index |new file|deleted file)/.test(l) ? 'd-meta' : l.startsWith('@@') ? 'd-hunk' : l.startsWith('+') ? 'd-add' : l.startsWith('-') ? 'd-del' : '';
         return `<span class="${cls}">${esc(l) || ' '}</span>`;
-      }).join('\n');
+      }).join(''); // block-level lines: no extra newline between them
       setHTML(el, `${head}${v.diff ? `<pre class="code diff">${body}</pre>` : '<div class="empty">No differences.</div>'}`);
     } else if (v.kind === 'guide') {
       const sk = ws.skills?.find((s) => s.id === v.id);

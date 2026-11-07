@@ -1,4 +1,5 @@
 import { createOffice, STATUS_LABEL, progressOf, periodOf, isNightHour, shortModel, MODE_TAG } from './scene.js';
+import { initWorkspace } from './workspace.js';
 
 // ------------------------------------------------------------------ token
 function readToken() {
@@ -50,7 +51,8 @@ const modeChip = (m) => {
   const t = MODE_TAG[m];
   return t ? `<span class="tag" style="--c:${t[1]}">${esc(t[0])}</span>` : `<span class="tag plain">Default</span>`;
 };
-const modelChips = (s) => `${s.model ? `<span class="tag plain" title="${esc(s.model)}">${esc(shortModel(s.model))}</span>` : ''}${s.effort ? `<span class="tag plain">${esc(s.effort)}</span>` : ''}${modeChip(s.permissionMode)}`;
+const skillChip = (s) => (s.skill?.active ? `<span class="tag skill" title="Skill in use">🧩 ${esc(s.skill.name)}</span>` : '');
+const modelChips = (s) => `${skillChip(s)}${s.model ? `<span class="tag plain" title="${esc(s.model)}">${esc(shortModel(s.model))}</span>` : ''}${s.effort ? `<span class="tag plain">${esc(s.effort)}</span>` : ''}${modeChip(s.permissionMode)}`;
 const isActive = (s) => s.status !== 'ended' && s.status !== 'stale';
 
 // Cards that need you float to the top; everything else keeps a stable order (by start time),
@@ -85,9 +87,57 @@ const office = createOffice($('#scene'), {
   onSelect: (id) => {
     if (id === 'minju') { setDockTab(state.approvals.length ? 'ask' : 'assign'); office.focus('minju'); expandDock(); return; }
     if (id === 'grok') { setDockTab('grok'); office.focus('grok'); expandDock(); return; }
+    if (id === 'library') { workspace.open(state.selectedId || sortedSessions().find(isActive)?.id || null, 'skills'); office.focus('library'); return; }
     select(id);
   },
 });
+
+// ------------------------------------------------------------ workspace
+async function dispatchTask(sessionId, text, skill = '') {
+  try {
+    const r = await api('/api/dispatch', { sessionId, text, skill });
+    office.pulse(sessionId, 'out');
+    toast(r.delivered ? '📨 Delivered: the agent is on it' : `📥 Queued (${r.queued}): delivered when the current turn ends`);
+    return true;
+  } catch (err) { toast(`⚠️ ${err.message}`); return false; }
+}
+const workspace = initWorkspace({
+  api, toast, state, esc, setHTML, ago,
+  dispatch: dispatchTask,
+  assignWithSkill(sessionId, skill) {
+    if (sessionId && state.sessions.get(sessionId) && isActive(state.sessions.get(sessionId))) $('#assign-target').value = sessionId;
+    renderAssignTargets();
+    pendingSkill = skill;
+    loadAssignSkills().then(() => { $('#assign-text').focus(); });
+    workspace.close();
+    setDockTab('assign');
+    expandDock();
+  },
+});
+
+// Skill picker on Minju's desk: the target session's skills, with a compact Skill Guide Block.
+let pendingSkill = '';
+let assignSkills = [];
+let assignSkillsFor = null;
+async function loadAssignSkills() {
+  const sessionId = $('#assign-target').value;
+  const sel = $('#assign-skill');
+  if (!sessionId) { sel.innerHTML = '<option value="">No skill</option>'; assignSkills = []; renderAssignGuide(); return; }
+  try {
+    const r = await workspace.loadSkills(sessionId);
+    assignSkills = r.skills.filter((x) => x.userInvocable || x.modelInvocable);
+    const want = pendingSkill || sel.value;
+    sel.innerHTML = `<option value="">No skill</option>${assignSkills.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join('')}`;
+    if (assignSkills.some((x) => x.name === want)) sel.value = want;
+    pendingSkill = '';
+  } catch { /* skills are optional */ }
+  renderAssignGuide();
+}
+function renderAssignGuide() {
+  const sk = assignSkills.find((x) => x.name === $('#assign-skill').value);
+  setHTML($('#assign-guide'), sk ? workspace.guideBlock(sk, { compact: true }) : '');
+  $('#assign-text').placeholder = sk ? `What should ${sk.name} do?${sk.argumentHint ? ` (arguments: ${sk.argumentHint})` : ''}` : 'e.g. Run the test suite and fix anything that fails';
+}
 
 function select(id, fly = true) {
   state.selectedId = id;
@@ -219,6 +269,8 @@ function renderDetail() {
         <dt>Doing</dt><dd title="${esc(s.activity)}">${esc(s.activity || '—')}</dd>
         <dt>Tool calls</dt><dd>${s.toolCount}</dd>
         <dt>Errors</dt><dd>${s.errorCount}</dd>
+        <dt>Skills</dt><dd>${Object.keys(s.skillsUsed || {}).length ? Object.entries(s.skillsUsed).map(([n, c]) => `${esc(n)}${c > 1 ? ` ×${c}` : ''}`).join(', ') : '—'}</dd>
+        <dt>Files</dt><dd>${(s.touched || []).filter((t) => t.op !== 'read').length} changed · ${(s.touched || []).filter((t) => t.op === 'read').length} read</dd>
         <dt>Queued</dt><dd>${s.queued || 0} task(s)</dd>
         <dt>Standby</dt><dd>${s.standby ? (s.waitingForTask ? 'on · waiting at desk' : 'on') : 'off'}</dd>
         <dt>Started</dt><dd>${clock(s.startedAt)}</dd>
@@ -227,6 +279,7 @@ function renderDetail() {
       </dl>
       ${s.lastMessage ? `<div class="section-title">Last reply</div><div class="quote">${esc(s.lastMessage)}</div>` : ''}
       <div class="detail-actions">
+        <button class="btn primary" data-act="workspace">Open workspace</button>
         ${isActive(s) ? `<button class="btn" data-act="assign">Assign a task</button>` : ''}
         ${s.queued ? `<button class="btn" data-act="clear-queue">Clear queue</button>` : ''}
         <button class="btn ghost" data-act="forget">Remove from office</button>
@@ -235,7 +288,7 @@ function renderDetail() {
 
   setHTML(el, `
     <div class="detail-head" style="--c:var(--st-${STATUS_LABEL[s.status] ? s.status : 'idle'})">
-      <div class="detail-title"><h3 title="${esc(s.project)}">${esc(s.project)}</h3>${chip(s.status)}<button class="icon-btn" data-act="close" aria-label="Close detail">✕</button></div>
+      <div class="detail-title"><h3 title="${esc(s.project)}">${esc(s.project)}</h3>${chip(s.status)}<button class="icon-btn" data-act="workspace" title="Open workspace: files, changes, skills" aria-label="Open workspace">🗂</button><button class="icon-btn" data-act="close" aria-label="Close detail">✕</button></div>
       <dl class="kv">
         <dt>cwd</dt><dd title="${esc(s.cwd)}">${esc(s.cwd || '—')}</dd>
         <dt>model</dt><dd title="${esc(s.model || '')}">${esc(shortModel(s.model) || '—')}${s.effort ? ` · effort ${esc(s.effort)}` : ''}</dd>
@@ -299,6 +352,7 @@ function renderAssignTargets() {
   const s = state.sessions.get(sel.value);
   $('#assign-standby').checked = !!s?.standby;
   $('#assign-standby').disabled = !s;
+  if (sel.value !== assignSkillsFor) { assignSkillsFor = sel.value; loadAssignSkills(); }
   setHTML($('#assign-hint'), s?.waitingForTask
     ? `<b>${esc(s.project)}</b> is waiting at its desk: a task you send now starts right away.`
     : `A task reaches the session when its current turn finishes. Turn on <b>Standby</b> to have an idle session wait at its desk for the next task.`);
@@ -418,6 +472,7 @@ $('#detail').addEventListener('click', async (e) => {
   if (!act) return;
   const id = state.selectedId;
   if (act === 'close') { state.selectedId = null; document.body.classList.remove('show-right'); office.overview(); renderAll(); return; }
+  if (act === 'workspace') { workspace.open(id, 'files'); return; }
   if (act === 'assign') { $('#assign-target').value = id; renderAssignTargets(); setDockTab('assign'); expandDock(); $('#assign-text').focus(); return; }
   try {
     if (act === 'forget') { await api('/api/forget', { sessionId: id }); state.selectedId = null; toast('Removed from the office'); }
@@ -449,6 +504,7 @@ $('#grok-pane').addEventListener('submit', async (e) => {
   } catch (err) { toast(`⚠️ ${err.message}`); }
 });
 $('#assign-target').addEventListener('change', renderAssignTargets);
+$('#assign-skill').addEventListener('change', renderAssignGuide);
 $('#assign-standby').addEventListener('change', async (e) => {
   try {
     await api('/api/standby', { sessionId: $('#assign-target').value, on: e.target.checked });
@@ -459,13 +515,10 @@ $('#assign-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const sessionId = $('#assign-target').value;
   const text = $('#assign-text').value.trim();
-  if (!sessionId || !text) return;
-  try {
-    const r = await api('/api/dispatch', { sessionId, text });
-    $('#assign-text').value = '';
-    office.pulse(sessionId, 'out');
-    toast(r.delivered ? '📨 Delivered: the agent is on it' : `📥 Queued (${r.queued}): delivered when the current turn ends`);
-  } catch (err) { toast(`⚠️ ${err.message}`); }
+  const skill = $('#assign-skill').value;
+  if (!sessionId) return;
+  if (!text && !skill) { toast('Write a task, or pick a skill'); $('#assign-text').focus(); return; }
+  if (await dispatchTask(sessionId, text, skill)) $('#assign-text').value = '';
 });
 $('#assign-text').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $('#assign-form').requestSubmit();
@@ -542,6 +595,7 @@ applyAtmo();
 $('#toggle-left').addEventListener('click', () => { document.body.classList.toggle('show-left'); document.body.classList.remove('show-right'); });
 $('#toggle-right').addEventListener('click', () => { document.body.classList.toggle('show-right'); document.body.classList.remove('show-left'); });
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && workspace.isOpen() && !e.target.closest('input, textarea, select')) { workspace.close(); return; }
   if (e.key === 'Escape' && !$('#time-panel').hidden) { setTimePanel(false); $('#time-btn').focus(); return; }
   if (e.key === 'Escape' && !e.target.closest('input, textarea, select')) { state.selectedId = null; document.body.classList.remove('show-left', 'show-right'); office.overview(); renderAll(); }
 });
@@ -577,6 +631,7 @@ function connect() {
       if (state.approvals.length) setDockTab('ask');
     } else if (msg.type === 'session') {
       state.sessions.set(msg.session.id, msg.session);
+      workspace.onSessionUpdate(msg.session.id);
     } else if (msg.type === 'limits') {
       state.limits = msg.limits;
     } else if (msg.type === 'external') {

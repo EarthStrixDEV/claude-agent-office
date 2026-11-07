@@ -48,21 +48,21 @@ const TOOLS = [
 
 const AGENTS = [
   {
-    cwd: '/Users/earth/projects/earth-portfolio', model: 'claude-opus-5-5', effort: 'high', mode: 'default',
+    cwd: '/Users/earth/projects/earth-portfolio', skill: 'frontend-design', model: 'claude-opus-5-5', effort: 'high', mode: 'default',
     prompts: ['Add a dark-mode toggle to the portfolio', 'Fix the hero animation jank on Safari'],
     tasks: ['Audit current theme tokens', 'Add theme toggle component', 'Wire toggle to localStorage', 'Update screenshots'],
     perm: { tool_name: 'Bash', tool_input: { command: 'npm install @fontsource/inter', description: 'Install font package' }, permission_suggestions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }], behavior: 'allow', destination: 'localSettings' }] },
     bg: 'npm run dev', sub: 'Explore',
   },
   {
-    cwd: '/Users/earth/projects/minju-memory-api', model: 'claude-sonnet-5-5', effort: 'medium', mode: 'acceptEdits',
+    cwd: '/Users/earth/projects/minju-memory-api', skill: 'engineering:code-review', model: 'claude-sonnet-5-5', effort: 'medium', mode: 'acceptEdits',
     prompts: ['Add pagination to /memories', 'Write tests for the search endpoint'],
     tasks: ['Design cursor pagination', 'Implement in repository layer', 'Add tests', 'Update API docs', 'Run full test suite'],
     perm: { tool_name: 'Bash', tool_input: { command: 'git push -u origin feat/pagination', description: 'Push branch' }, permission_suggestions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }] },
     sub: 'code-reviewer',
   },
   {
-    cwd: '/Users/earth/work/gps-report-bot', model: 'claude-sonnet-5-5', effort: 'low', mode: 'default',
+    cwd: '/Users/earth/work/gps-report-bot', skill: 'xlsx', model: 'claude-sonnet-5-5', effort: 'low', mode: 'default',
     prompts: ['Summarise this week\'s GPS tickets into a report'],
     tasks: ['Collect tickets', 'Group by customer', 'Draft report'],
     compact: true,
@@ -74,7 +74,7 @@ const AGENTS = [
     endAfter: 2,
   },
   {
-    cwd: '/Users/earth/finance/liberator-suite', model: 'claude-opus-5-5', effort: 'xhigh', mode: 'plan',
+    cwd: '/Users/earth/finance/liberator-suite', skill: 'engineering:architecture', model: 'claude-opus-5-5', effort: 'xhigh', mode: 'plan',
     prompts: ['Plan the monthly budget import feature'],
     tasks: ['Read existing importers', 'Draft plan'],
     bg: 'python watch_statements.py', sub: 'Plan',
@@ -118,6 +118,10 @@ async function runAgent(def, delay) {
     for (const t of ids) { await send('TaskCreated', { task_id: t.id, task_subject: t.subject }); await sleep(250); }
 
     for (const [i, t] of ids.entries()) {
+      if (i === 0 && def.skill) {
+        await send('PreToolUse', { tool_name: 'Skill', tool_use_id: 'toolu_s' + i, tool_input: { skill: def.skill } });
+        await send('PostToolUse', { tool_name: 'Skill', tool_use_id: 'toolu_s' + i, tool_input: { skill: def.skill } });
+      }
       for (let k = 0, n = Math.ceil(rand(2, 5)); k < n; k++) await tool();
 
       if (i === 0 && def.bg && round === 0) {

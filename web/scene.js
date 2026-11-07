@@ -372,15 +372,26 @@ function makeAvatar(shirt, { scale = 1, seed = 'x', minju = false } = {}) {
     arms[side] = { upper, fore };
   }
 
+  const book = new THREE.Group();
+  const cover = new THREE.Mesh(RB(0.2, 0.03, 0.26, 0.008), new THREE.MeshStandardMaterial({ color: PASTEL[Math.floor(r() * PASTEL.length)], roughness: 0.5 }));
+  const pages = new THREE.Mesh(new THREE.BoxGeometry(0.185, 0.02, 0.24), M.paper);
+  pages.position.y = 0.014;
+  book.add(cover, pages);
+  book.position.set(0, 0.27, 0.3);
+  book.rotation.x = -0.75;
+  book.visible = false;
+  body.add(book);
+
   g.scale.setScalar(scale);
-  g.userData = { body, head, arms, legs, shirt: shirtMat, gait: 0 };
+  g.userData = { body, head, arms, legs, book, shirt: shirtMat, gait: 0 };
   return g;
 }
 
 // Poses: sit-working, sit-thinking, sit-idle, stand-idle, stand-wave, walk, run.
 // Every joint eases toward its target, so switching pose (sit -> stand -> walk) blends smoothly.
 function setPose(avatar, pose, ph, motion, dt) {
-  const { body, head, arms, legs, gait } = avatar.userData;
+  const { body, head, arms, legs, gait, book } = avatar.userData;
+  if (book) book.visible = pose === 'stand-read';
   const k = 1 - Math.exp(-dt * 12);
   const T = (o, x, kk = k) => { o.rotation.x += (x - o.rotation.x) * kk; };
   const seated = pose.startsWith('sit');
@@ -415,7 +426,10 @@ function setPose(avatar, pose, ph, motion, dt) {
   } else {
     T(legs.L.hip, 0); T(legs.R.hip, 0); T(legs.L.knee, 0); T(legs.R.knee, 0);
     T(arms.L.upper, -0.06); T(arms.L.fore, -0.25);
-    if (pose === 'stand-wave') {
+    if (pose === 'stand-read') {
+      T(arms.L.upper, -0.55); T(arms.R.upper, -0.55); T(arms.L.fore, -1.15); T(arms.R.fore, -1.15);
+      head.rotation.x = 0.4;
+    } else if (pose === 'stand-wave') {
       T(arms.R.upper, -2.75);
       arms.R.fore.rotation.x = -0.35 + motion * 0.35 * Math.sin(ph * 8);
       head.rotation.x = -0.1;
@@ -423,7 +437,7 @@ function setPose(avatar, pose, ph, motion, dt) {
       T(arms.R.upper, -0.06); T(arms.R.fore, -0.25);
       head.rotation.x = 0.02;
     }
-    head.rotation.y = motion * 0.15 * Math.sin(ph * 0.7);
+    head.rotation.y = pose === 'stand-read' ? 0 : motion * 0.15 * Math.sin(ph * 0.7);
     bodyY = STAND_H + motion * 0.006 * Math.sin(ph * 2.2); // breathing
   }
   body.position.y += (bodyY - body.position.y) * follow;
@@ -611,7 +625,7 @@ class Desk {
     this.alert.visible = approvalsCount > 0 || status === 'waiting';
     this.halo.visible = selected;
 
-    const sub = [STATUS_LABEL[status] || status, shortModel(s.model), s.effort, s.queued ? `${s.queued} queued` : ''].filter(Boolean).join(' · ');
+    const sub = [STATUS_LABEL[status] || status, s.skill?.active ? `🧩 ${s.skill.name}` : shortModel(s.model), s.skill?.active ? '' : s.effort, s.queued ? `${s.queued} queued` : ''].filter(Boolean).join(' · ');
     const tag = MODE_TAG[s.permissionMode] || null;
     const key = `${s.project}|${sub}|${color}|${ended}|${L.bg}|${tag?.[0]}`;
     if (key !== this.labelKey) {
@@ -766,6 +780,13 @@ function minjuSpot(k) {
   return { aisle: 0, angle: a, point: polar(4.2 + Math.floor(k / offs.length) * 0.9, a) };
 }
 const faceCenter = (p) => Math.atan2(-p.x, -p.z);
+// Skill Library: a curved bookcase on Minju's west side; readers stand in front of it.
+const LIB_ANGLE = Math.PI, LIB_R = 4.05;
+function librarySpot(k) {
+  const offs = [0, 0.26, -0.26, 0.52, -0.52];
+  const a = LIB_ANGLE + offs[k % offs.length];
+  return { aisle: 0, angle: a, point: polar(5.0 + Math.floor(k / offs.length) * 0.7, a) };
+}
 
 class Agent {
   constructor(scene, s) {
@@ -797,23 +818,36 @@ class Agent {
     this.fade = 1;
     this.avatar.scale.setScalar(1);
   }
-  sync(s, desk, { initial, takeSpot, freeSpot }) {
+  sync(s, desk, opts) {
     this.status = s.status;
     this.desk = desk;
+    this.opts = opts;
     this.avatar.userData.shirt.color.copy(s.status === 'stale' ? new THREE.Color(STATUS.stale) : shirtColor(s.project || s.id));
-    const goal = s.status === 'waiting' ? 'minju' : s.status === 'ended' ? 'gone' : 'desk';
+    // a new skill call sends the agent to the Skill Library for a moment
+    const skillAt = s.skill?.at || 0;
+    if (skillAt !== (this.lastSkillAt ?? skillAt)) {
+      if (!opts.initial && !REDUCED_MOTION && s.status !== 'ended') this.wantLibrary = true;
+    }
+    this.lastSkillAt = skillAt;
+    const goal = s.status === 'waiting' ? 'minju' : s.status === 'ended' ? 'gone' : this.wantLibrary || this.goal === 'library' ? 'library' : 'desk';
     if (goal === this.goal) return;
+    this.goTo(goal, opts.initial);
+  }
+  goTo(goal, instant = false) {
+    const { takeSpot, freeSpot, takeShelf, freeShelf } = this.opts;
     const from = this.goal;
     this.goal = goal;
     if (from === 'minju' && goal !== 'minju') { freeSpot(this.spot); this.spot = -1; }
+    if (from === 'library' && goal !== 'library') { freeShelf(this.shelf); this.shelf = -1; }
     let target, arrive;
-    if (goal === 'desk') { target = this.deskTarget(desk); arrive = 'seated'; }
+    if (goal === 'desk') { target = this.deskTarget(this.desk); arrive = 'seated'; }
     else if (goal === 'minju') { this.spot = takeSpot(); target = minjuSpot(this.spot); arrive = 'minju'; }
+    else if (goal === 'library') { this.shelf = takeShelf(); target = librarySpot(this.shelf); arrive = 'reading'; this.wantLibrary = false; this.readT = 0; }
     else { target = GATE; arrive = 'hidden'; }
     this.target = target;
     this.arrive = arrive;
-    if (initial || REDUCED_MOTION || (this.mode === 'hidden' && goal === 'gone')) {
-      this.place(target, arrive, arrive === 'seated' ? desk.yaw : faceCenter(target.point));
+    if (instant || REDUCED_MOTION || (this.mode === 'hidden' && goal === 'gone')) {
+      this.place(target, arrive, arrive === 'seated' ? this.desk.yaw : faceCenter(target.point));
       return;
     }
     if (this.mode === 'hidden') { // arrive through the gate
@@ -828,6 +862,7 @@ class Agent {
   }
   leaveForGood() {
     if (this.goal === 'gone' && this.mode === 'hidden') return true;
+    if (this.goal === 'library') { this.opts?.freeShelf(this.shelf); this.shelf = -1; }
     if (this.goal !== 'gone') {
       this.goal = 'gone'; this.target = GATE; this.arrive = 'hidden'; this.run = false;
       if (REDUCED_MOTION || this.mode === 'hidden') { this.place(GATE, 'hidden', 0); return true; }
@@ -872,6 +907,11 @@ class Agent {
     } else if (this.mode === 'minju') {
       av.rotation.y += angDiff(av.rotation.y, faceCenter(av.position)) * Math.min(1, dt * 6);
       setPose(av, 'stand-wave', ph, motion, dt);
+    } else if (this.mode === 'reading') {
+      av.rotation.y += angDiff(av.rotation.y, faceCenter(av.position)) * Math.min(1, dt * 6);
+      setPose(av, 'stand-read', ph, motion, dt);
+      this.readT += dt;
+      if (this.readT > 2.8) this.goTo(this.status === 'waiting' ? 'minju' : this.status === 'ended' ? 'gone' : 'desk');
     }
   }
   dispose() { this.scene.remove(this.avatar); }
@@ -1316,6 +1356,57 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     drawGrokLabel();
   }
 
+  // ---- Skill Library bookcase
+  const library = new THREE.Group();
+  {
+    const caseMat = new THREE.MeshStandardMaterial({ color: '#FFFFFF', roughness: 0.4 });
+    const caseGeo = merge([
+      part(RB(0.72, 1.7, 0.04, 0.01), 0, 0.85, -0.14),               // back
+      part(RB(0.04, 1.7, 0.32, 0.01), -0.34, 0.85, 0), part(RB(0.04, 1.7, 0.32, 0.01), 0.34, 0.85, 0),
+      ...[0.04, 0.46, 0.88, 1.3, 1.68].map((y) => part(RB(0.72, 0.035, 0.32, 0.008), 0, y, 0)),
+    ]);
+    const caseM = [], bookM = [], bookC = [];
+    const r = TX.rng(55);
+    for (let k = -2; k <= 2; k++) {
+      const a = LIB_ANGLE + k * 0.165;
+      const p = polar(LIB_R, a);
+      const seg = local(p.x, 0, p.z, Math.atan2(Math.cos(a), Math.sin(a))); // front faces away from Minju
+      caseM.push(seg);
+      for (const y of [0.06, 0.48, 0.9, 1.32]) {
+        let x = -0.3;
+        while (x < 0.28) {
+          const w = 0.035 + r() * 0.035, h = 0.24 + r() * 0.13;
+          if (r() < 0.08) { x += w; continue; }
+          bookM.push(seg.clone().multiply(new THREE.Matrix4().compose(new THREE.Vector3(x + w / 2, y + h / 2, 0.01), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, r() < 0.12 ? 0.18 : 0)), new THREE.Vector3(w, h, 0.22))));
+          bookC.push(new THREE.Color(PASTEL[Math.floor(r() * PASTEL.length)]).offsetHSL(0, 0, (r() - 0.5) * 0.15));
+          x += w + 0.004;
+        }
+      }
+    }
+    library.add(instanced(caseGeo, caseMat, caseM));
+    library.add(instanced(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ roughness: 0.6 }), bookM, { colors: bookC }));
+    const labelCanvas = document.createElement('canvas');
+    labelCanvas.width = 512; labelCanvas.height = 136;
+    const labelTex = new THREE.CanvasTexture(labelCanvas);
+    labelTex.colorSpace = THREE.SRGBColorSpace;
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTex, transparent: true, depthWrite: false, toneMapped: false }));
+    label.scale.set(2.1, 0.56, 1);
+    label.position.copy(polar(LIB_R - 0.2, LIB_ANGLE)).setY(2.45);
+    library.add(label);
+    library.userData.label = { canvas: labelCanvas, tex: labelTex };
+    const hit = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.2, 4), new THREE.MeshBasicMaterial({ visible: false }));
+    hit.position.copy(polar(LIB_R + 0.2, LIB_ANGLE)).setY(1.1);
+    hit.userData.library = true;
+    library.add(hit);
+    library.userData.hit = hit;
+  }
+  scene.add(library);
+  function drawLibraryLabel() {
+    const { canvas, tex } = library.userData.label;
+    drawLabel(canvas.getContext('2d'), 512, 136, 'Skill Library', 'Skills · Plugins · MCP', '#8A7CF0', false, true);
+    tex.needsUpdate = true;
+  }
+
   // ---- Minju's dispatch desk
   const minju = new THREE.Group();
   scene.add(minju);
@@ -1597,6 +1688,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     L = LABEL[name] || LABEL.light;
     drawMinjuLabel();
     drawGrokLabel();
+    drawLibraryLabel();
     for (const d of desks) { d.labelKey = null; if (d.session) d.setSession(d.session, d.asks, d.selected); }
   }
 
@@ -1605,6 +1697,9 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   const spots = new Set();
   const takeSpot = () => { let k = 0; while (spots.has(k)) k++; spots.add(k); return k; };
   const freeSpot = (k) => spots.delete(k);
+  const shelves = new Set();
+  const takeShelf = () => { let k = 0; while (shelves.has(k)) k++; shelves.add(k); return k; };
+  const freeShelf = (k) => shelves.delete(k);
   let firstUpdate = true;
   function update(sessions, approvals, selId) {
     const live = new Set(sessions.map((s) => s.id));
@@ -1626,7 +1721,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
       let ag = agents.get(s.id);
       if (!ag) { ag = new Agent(scene, s); agents.set(s.id, ag); }
       ag.leaving = false;
-      ag.sync(s, desk, { initial: firstUpdate, takeSpot, freeSpot });
+      ag.sync(s, desk, { initial: firstUpdate, takeSpot, freeSpot, takeShelf, freeShelf });
     }
     firstUpdate = false;
   }
@@ -1638,6 +1733,11 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   }
   const narrow = () => camera.aspect < 0.9;
   function focus(sessionId) {
+    if (sessionId === 'library') {
+      const out = polar(1, LIB_ANGLE);
+      flyTo(polar(LIB_R + 0.8, LIB_ANGLE).setY(1.2), out.multiplyScalar(8.5).add(new THREE.Vector3(0, 4.2, 3)));
+      return;
+    }
     if (sessionId === 'grok') {
       const out = GROK_POS.clone().normalize();
       flyTo(GROK_POS.clone().setY(1.8), out.multiplyScalar(-7.5).add(new THREE.Vector3(out.z * 4, 5.5, -out.x * 4)));
@@ -1666,7 +1766,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   let down = null;
-  const hitTargets = () => [minju.userData.hit, grok.userData.hit, ...desks.filter((d) => d.sessionId).map((d) => d.hit)];
+  const hitTargets = () => [minju.userData.hit, grok.userData.hit, library.userData.hit, ...desks.filter((d) => d.sessionId).map((d) => d.hit)];
   function pick(ev) {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.set(((ev.clientX - rect.left) / rect.width) * 2 - 1, -((ev.clientY - rect.top) / rect.height) * 2 + 1);
@@ -1675,6 +1775,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     if (!hit) return null;
     if (hit.object.userData.minju) return 'minju';
     if (hit.object.userData.grok) return 'grok';
+    if (hit.object.userData.library) return 'library';
     return hit.object.userData.desk?.sessionId || null;
   }
   renderer.domElement.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY }; });
@@ -1699,6 +1800,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
 
   drawMinjuLabel();
   drawGrokLabel();
+  drawLibraryLabel();
   setQuality(quality);
   setTime(hour);
   document.fonts?.ready.then(() => setUiTheme(L === LABEL.dark ? 'dark' : 'light'));
@@ -1818,6 +1920,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   });
 
   if (new URLSearchParams(location.search).has('stats')) window.__officeStats = () => ({ ...renderer.info.render, programs: renderer.info.programs?.length });
+  if (new URLSearchParams(location.search).has('stats')) window.__officeFocus = (id) => focus(id);
   if (new URLSearchParams(location.search).has('stats')) window.__officeAgents = () => [...agents.values()].map((a) => ({ id: a.id.slice(0, 6), status: a.status, goal: a.goal, mode: a.mode, run: a.run, left: a.path.length, pos: a.avatar.position.toArray().map((n) => +n.toFixed(1)), visible: a.avatar.visible }));
 
   return {
