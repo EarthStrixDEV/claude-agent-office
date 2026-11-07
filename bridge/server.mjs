@@ -676,6 +676,7 @@ function dispatch(sessionId, text, skill) {
 }
 
 // ------------------------------------------------------------------ HTTP ----
+const rejectedHosts = new Set();
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ALLOWED_ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
 const MIME = {
@@ -723,7 +724,11 @@ function serveFile(res, baseDir, rel) {
 
 const server = http.createServer(async (req, res) => {
   // DNS-rebinding guard: only answer requests addressed to loopback.
-  if (!ALLOWED_HOSTS.has(req.headers.host || '')) return send(res, 421, { error: 'bad host' });
+  if (!ALLOWED_HOSTS.has(req.headers.host || '')) {
+    const h = String(req.headers.host || '(none)').slice(0, 100);
+    if (!rejectedHosts.has(h)) { rejectedHosts.add(h); console.warn(`  Refused a request for host "${h}". Only ${[...ALLOWED_HOSTS].join(', ')} are answered.`); }
+    return send(res, 421, { error: 'bad host' });
+  }
   const url = new URL(req.url, `http://${req.headers.host}`);
   const p = url.pathname;
 
