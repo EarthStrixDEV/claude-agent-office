@@ -5,11 +5,11 @@
 A 3D office that shows every Claude Code session on your machine as an agent at a desk.
 Minju's round desk sits in the middle: answer permission requests and hand out tasks from there.
 
-The office is a floating island in Minju City's style: terrazzo floor, a garden ring with trees, lamps and benches, a pastel skyline, and white glass panels set in Mali and IBM Plex Sans Thai.
+The office is a Minju City-style island floating in orbit: terrazzo floor, a garden ring with trees, lamps and benches, and white glass panels set in Mali and IBM Plex Sans Thai. Around it is space: the Milky Way, the Earth ahead and below with drifting clouds and city lights, the Sun rising over the Earth's rim, a space station circling the office, a spinning ring station, satellites, an asteroid belt and shooting meteors.
 
 **Time of day.** The clock button in the top bar opens *Atmosphere*:
 
-- **Clock.** Pick Real time (follows this computer), Manual (presets plus a sky-gradient slider), or Time-lapse (a whole day every 2 minutes). Lighting blends between Minju City's six keyframes: night, before dawn, sunrise, day, sunset and dusk. At night the windows, street lamps and desk lamps light up and stars come out.
+- **Clock.** Pick Real time (follows this computer), Manual (presets plus a sky-gradient slider), or Time-lapse (a whole day every 2 minutes). Lighting blends between Minju City's six keyframes: night, before dawn, sunrise, day, sunset and dusk. Through the day the Sun slides along the Earth's rim. At night it sets behind the Earth: the Earth's face goes dark with city lights under an orange rim, and the street lamps, desk lamps and station windows light up.
 - **Panels.** *Follow time* switches the panels to dark at night. You can also pin them to Light or Dark.
 - **Quality.** *Ultra* gives a 4K shadow map, retina pixel ratio, bushes, flowers and desk props. *Standard* is lighter and is the default on phones.
 
@@ -58,7 +58,7 @@ npm run hooks:uninstall
 - **Usage limits.** The top bar shows the claude.ai **5-hour** and **weekly** windows as bars with a reset countdown. A bar turns amber at 70% and red at 90%. Claude limits aren't hourly: these two rolling windows are what Claude Code reports.
 - **Always allow.** When Claude Code offers a permission rule for a request, such as `Bash(npm install:*)` or switching to Accept edits, the Ask Input card shows *Always allow*. The card says exactly what that button saves.
 - **Agents move.** New sessions walk in through the arrivals gate to their desk. A session that needs approval runs to Minju's desk and waves until you answer, then walks back. Ended sessions walk out. Walkers follow the aisles and cross a ring of desks only through the gaps between them.
-- **The garden is alive.** Trees sway in gusting wind, leaves and petals fall with gravity and drag, the fountain sprays, and birds circle by day.
+- **The garden is alive.** Trees sway in gusting wind, leaves and petals fall with gravity and drag, the fountain sprays, satellites blink past on tilted orbits, rocks tumble round the belt, and meteors streak down towards the Earth.
 - **Grok Bots (optional).** A pavilion on the lawn plus a *Grok Bots* dock tab. See [Grok Bot](#grok-bot-optional) below.
 
 `?timescale=3` in the URL speeds up walking and physics. It's handy for demos.
@@ -125,8 +125,9 @@ Grok Bot has no status API, so the office can't read your Bots by itself. Two pi
 ## Look and performance
 
 - `web/styles.css` holds the panel tokens: `:root[data-theme="light"]` and `:root[data-theme="dark"]`.
-- `web/scene.js` holds the scene, plus the time-of-day keyframes (`K_NIGHT` … `K_DUSK`, taken from Minju City's preset values).
-- `web/textures.js` draws every texture procedurally: wood, terrazzo, grass, fabric, rock, rug, keyboards, skyline and the live code on each screen. There are no image downloads.
+- `web/scene.js` holds the office, plus the time-of-day keyframes (`K_NIGHT` … `K_DUSK`, taken from Minju City's preset values).
+- `web/space.js` holds everything around it. The sky, Earth and Sun sit in a separate background scene thousands of units away, so the desks keep full depth precision. The Earth's surface, clouds and sky are painted once on the GPU at start-up, so each frame only samples textures.
+- `web/textures.js` draws every texture procedurally: wood, terrazzo, grass, fabric, rock, rug, keyboards, solar panels, gold foil, the Sun and the live code on each screen. There are no image downloads.
 - Desks, chairs, props, trees, flowers, lamps and benches are drawn as `InstancedMesh`, so all 42 desks share a few draw calls. Per-desk meshes are only the live parts: screen, status light, label, and the avatar when someone sits there.
 - Add `?stats` to the URL and run `__officeStats()` in the console to see draw calls and triangles.
 

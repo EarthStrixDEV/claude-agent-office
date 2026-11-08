@@ -149,62 +149,87 @@ export function keyboardTexture() {
   });
 }
 
-export function cloudTexture() {
-  return make(256, 128, (ctx, w, h) => {
-    const r = rng(21);
-    for (let i = 0; i < 14; i++) {
-      const x = 40 + r() * (w - 80), y = h * 0.55 + (r() - 0.5) * 30, s = 22 + r() * 30;
-      const g = ctx.createRadialGradient(x, y, 0, x, y, s);
-      g.addColorStop(0, 'rgba(255,255,255,0.95)'); g.addColorStop(0.6, 'rgba(255,255,255,0.6)'); g.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, s, 0, Math.PI * 2); ctx.fill();
+// Solar array blanket: dark blue cells in a silver frame.
+export function solarPanelTexture() {
+  return make(256, 512, (ctx, w, h) => {
+    const r = rng(8);
+    ctx.fillStyle = '#C9CED8'; ctx.fillRect(0, 0, w, h);
+    const cols = 4, rows = 16, pad = 6, gap = 3;
+    const cw = (w - pad * 2 - gap * (cols - 1)) / cols, ch = (h - pad * 2 - gap * (rows - 1)) / rows;
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const px = pad + x * (cw + gap), py = pad + y * (ch + gap), l = 16 + r() * 10;
+        const g = ctx.createLinearGradient(px, py, px + cw, py + ch);
+        g.addColorStop(0, `hsl(222,62%,${l + 6}%)`); g.addColorStop(1, `hsl(228,70%,${l - 4}%)`);
+        ctx.fillStyle = g; ctx.fillRect(px, py, cw, ch);
+        ctx.strokeStyle = 'rgba(150,180,235,0.35)'; ctx.lineWidth = 1;
+        for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(px + (cw * i) / 4, py); ctx.lineTo(px + (cw * i) / 4, py + ch); ctx.stroke(); }
+      }
     }
-  }, { repeat: [1, 1] });
-}
-
-export function moonTexture() {
-  return make(128, 128, (ctx, w) => {
-    const c = w / 2;
-    const g = ctx.createRadialGradient(c, c, 20, c, c, 64);
-    g.addColorStop(0, 'rgba(255,250,235,0.5)'); g.addColorStop(1, 'rgba(255,250,235,0)');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, w, w);
-    ctx.fillStyle = '#FFF8E6'; ctx.beginPath(); ctx.arc(c, c, 26, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = 'rgba(210,200,180,0.5)';
-    for (const [x, y, s] of [[-8, -6, 6], [9, 4, 4], [-2, 11, 3], [6, -12, 3]]) { ctx.beginPath(); ctx.arc(c + x, c + y, s, 0, Math.PI * 2); ctx.fill(); }
   });
 }
 
-// The same skyline twice: pastel by day, dark with lit windows by night (cross-faded in the scene).
-export function cityTextures() {
-  const draw = (night) => (ctx, w, h) => {
-    const r = rng(42);
-    if (night) {
-      ctx.fillStyle = 'rgba(0,0,0,0)'; ctx.clearRect(0, 0, w, h);
-    } else {
-      const g = ctx.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, '#7EC8F5'); g.addColorStop(0.75, '#FFE9F2'); g.addColorStop(1, '#FFF4F8');
-      ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+// Crinkled gold multi-layer insulation.
+export function foilTexture() {
+  return make(256, 256, (ctx, w, h) => {
+    const r = rng(19);
+    ctx.fillStyle = '#C8963A'; ctx.fillRect(0, 0, w, h);
+    for (let i = 0; i < 260; i++) {
+      const x = r() * w, y = r() * h, s = 8 + r() * 30, l = r();
+      ctx.fillStyle = l < 0.5 ? `rgba(120,78,20,${0.15 + r() * 0.25})` : `rgba(255,226,150,${0.15 + r() * 0.3})`;
+      ctx.beginPath(); ctx.moveTo(x, y);
+      for (let k = 0; k < 3; k++) ctx.lineTo(x + (r() - 0.5) * s * 2, y + (r() - 0.5) * s * 2);
+      ctx.closePath(); ctx.fill();
     }
-    const pastel = ['#FF8FB8', '#FFB070', '#7CC4F5', '#FFD86B', '#B9A8F0', '#8FDDB8', '#9FD4F2', '#FFC4D8'];
-    let x = 0;
-    while (x < w) {
-      const bw = 30 + r() * 60, bh = 60 + r() * 180, y0 = h - bh, col = pastel[Math.floor(r() * pastel.length)];
-      const c = new THREE.Color(col);
-      if (night) c.multiplyScalar(0.18).lerp(new THREE.Color('#141a3a'), 0.5);
-      ctx.fillStyle = `#${c.getHexString()}`;
-      roundRect(ctx, x, y0, bw, bh + 10, 8); ctx.fill();
-      if (r() < 0.3) { ctx.fillRect(x + bw / 2 - 1, y0 - 14, 2, 14); } // antenna
-      for (let wy = y0 + 10; wy < h - 8; wy += 13) {
-        for (let wx = x + 7; wx < x + bw - 7; wx += 10) {
-          const lit = r();
-          if (night) {
-            if (lit < 0.55) { ctx.fillStyle = lit < 0.45 ? 'rgba(255,214,140,0.95)' : 'rgba(170,210,255,0.9)'; ctx.fillRect(wx, wy, 5, 7); }
-          } else if (lit < 0.75) { ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.fillRect(wx, wy, 5, 7); }
-        }
-      }
-      x += bw + 5;
+  }, { repeat: [2, 1] });
+}
+
+// Open lattice for the station truss (used with alphaTest).
+export function trussTexture() {
+  return make(256, 64, (ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#D9DCE3'; ctx.lineCap = 'round';
+    ctx.lineWidth = 7; ctx.strokeRect(3.5, 3.5, w - 7, h - 7);
+    ctx.lineWidth = 5;
+    for (let x = 0; x < w; x += 64) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + 64, h); ctx.stroke();
     }
-  };
-  return { day: make(1024, 320, draw(false)), night: make(1024, 320, draw(true)) };
+  }, { repeat: [10, 1] });
+}
+
+// The Sun: a white-hot core in a warm corona.
+export function sunTexture() {
+  return make(512, 512, (ctx, w) => {
+    const c = w / 2;
+    const g = ctx.createRadialGradient(c, c, 0, c, c, c);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.05, 'rgba(255,255,250,1)');
+    g.addColorStop(0.09, 'rgba(255,240,215,0.85)');
+    g.addColorStop(0.2, 'rgba(255,205,150,0.32)');
+    g.addColorStop(0.45, 'rgba(255,160,110,0.08)');
+    g.addColorStop(1, 'rgba(255,140,100,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, w);
+  }, { repeat: [1, 1] });
+}
+
+// Glare streaks around the Sun.
+export function sunRaysTexture() {
+  return make(512, 512, (ctx, w) => {
+    const r = rng(5), c = w / 2;
+    ctx.translate(c, c);
+    ctx.globalCompositeOperation = 'lighter';
+    const ray = (angle, len, width, alpha) => {
+      ctx.save(); ctx.rotate(angle);
+      const g = ctx.createLinearGradient(0, 0, len, 0);
+      g.addColorStop(0, `rgba(255,236,200,${alpha})`); g.addColorStop(1, 'rgba(255,236,200,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.moveTo(0, -width); ctx.lineTo(len, 0); ctx.lineTo(0, width); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    };
+    for (let i = 0; i < 6; i++) ray((i / 6) * Math.PI * 2 + 0.3, c * 0.98, 5, 0.55);
+    for (let i = 0; i < 40; i++) ray(r() * Math.PI * 2, c * (0.25 + r() * 0.55), 1.5 + r() * 3, 0.12 + r() * 0.2);
+  }, { repeat: [1, 1] });
 }
 
 // A code editor / terminal, drawn per desk and scrolled while the agent works.

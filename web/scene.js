@@ -1,4 +1,4 @@
-// The 3D office: a floating Minju City island. Minju's round dispatch desk sits in the middle,
+// The 3D office: a Minju City island floating in orbit above the Earth (see space.js). Minju's round dispatch desk sits in the middle,
 // agent desks stand on rings around it, and a garden ring with lamps and trees circles the edge.
 //
 // Lighting follows a time of day (the same six keyframes as Minju City). Static furniture is
@@ -9,6 +9,7 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as TX from './textures.js';
+import { createSpace } from './space.js';
 
 export const STATUS_LABEL = {
   idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Needs you', error: 'Error',
@@ -28,16 +29,16 @@ const LABEL = {
 let L = LABEL.light;
 
 // ------------------------------------------------------------ time of day
-// Minju City keyframes (hour -> look). Fog distances are scaled to this smaller island.
-const K_NIGHT = { skyTop: 0x0B1230, skyBottom: 0x2B2A5E, fog: 0x1E2148, fogNear: 110, fogFar: 460, sun: 0x9DB4FF, sunInt: 0.5, sunPos: [-40, 80, -60], hemiSky: 0x5466A8, hemiGround: 0x1C1830, hemiInt: 0.5, foliage: 0x3E6E58, cloud: 0x4A4F7A, window: 1.7, lamp: 2.2, stars: 1, sunDisc: 0, moon: 1, exposure: 1.15 };
-const K_PREDAWN = { skyTop: 0x141B45, skyBottom: 0x6B5A92, fog: 0x3E3B66, fogNear: 110, fogFar: 440, sun: 0x8FA6FF, sunInt: 0.45, sunPos: [100, 14, 35], hemiSky: 0x5A6BB0, hemiGround: 0x241E3C, hemiInt: 0.5, foliage: 0x4A7A60, cloud: 0x57598A, window: 1.4, lamp: 1.8, stars: 0.55, sunDisc: 0, moon: 0.4, exposure: 1.12 };
-const K_DAWN = { skyTop: 0x7B8FD0, skyBottom: 0xFFC8A6, fog: 0xF2C4B4, fogNear: 120, fogFar: 470, sun: 0xFFB98A, sunInt: 1.4, sunPos: [95, 24, 35], hemiSky: 0xFFD1B8, hemiGround: 0x8F7AA8, hemiInt: 0.8, foliage: 0x9CC48A, cloud: 0xFFD8C8, window: 0.7, lamp: 0.5, stars: 0.1, sunDisc: 1, moon: 0, exposure: 1.05 };
-const K_DAY = { skyTop: 0x7EC8F5, skyBottom: 0xFFE9F2, fog: 0xFFE4EF, fogNear: 140, fogFar: 520, sun: 0xFFF4E0, sunInt: 2.6, sunPos: [75, 70, 40], hemiSky: 0xDDEEFF, hemiGround: 0xFFE2EC, hemiInt: 1.05, foliage: 0x86D28F, cloud: 0xFFFFFF, window: 0, lamp: 0, stars: 0, sunDisc: 1, moon: 0, exposure: 1.0 };
+// Minju City keyframes (hour -> look): they light the office; space.js moves the Sun round the Earth.
+const K_NIGHT = { sun: 0x9DB4FF, sunInt: 0.5, sunPos: [-40, 80, -60], hemiSky: 0x5466A8, hemiGround: 0x1C1830, hemiInt: 0.5, foliage: 0x3E6E58, window: 1.7, lamp: 2.2, stars: 1, exposure: 1.15 };
+const K_PREDAWN = { sun: 0x8FA6FF, sunInt: 0.45, sunPos: [100, 14, 35], hemiSky: 0x5A6BB0, hemiGround: 0x241E3C, hemiInt: 0.5, foliage: 0x4A7A60, window: 1.4, lamp: 1.8, stars: 0.55, exposure: 1.12 };
+const K_DAWN = { sun: 0xFFB98A, sunInt: 1.4, sunPos: [95, 24, 35], hemiSky: 0xFFD1B8, hemiGround: 0x8F7AA8, hemiInt: 0.8, foliage: 0x9CC48A, window: 0.7, lamp: 0.5, stars: 0.1, exposure: 1.05 };
+const K_DAY = { sun: 0xFFF4E0, sunInt: 2.6, sunPos: [75, 70, 40], hemiSky: 0xDDEEFF, hemiGround: 0xFFE2EC, hemiInt: 1.05, foliage: 0x86D28F, window: 0, lamp: 0, stars: 0, exposure: 1.0 };
 const K_DAY2 = { ...K_DAY, sunPos: [-35, 78, 40] };
-const K_SUNSET = { skyTop: 0x6C5BA8, skyBottom: 0xFFB38A, fog: 0xF4B6A0, fogNear: 120, fogFar: 480, sun: 0xFF9A6B, sunInt: 1.8, sunPos: [-95, 22, 35], hemiSky: 0xFFC2A8, hemiGround: 0x8A6A9E, hemiInt: 0.75, foliage: 0x9DBE78, cloud: 0xFFD2C2, window: 0.7, lamp: 0.55, stars: 0.12, sunDisc: 1, moon: 0, exposure: 1.05 };
-const K_DUSK = { skyTop: 0x2A2A6A, skyBottom: 0x8A5C9E, fog: 0x6A4E88, fogNear: 115, fogFar: 460, sun: 0xFF7F6B, sunInt: 0.8, sunPos: [-100, 14, 35], hemiSky: 0x8A7AC0, hemiGround: 0x3A2E56, hemiInt: 0.6, foliage: 0x5E8466, cloud: 0x8A6A98, window: 1.3, lamp: 1.5, stars: 0.6, sunDisc: 0, moon: 0.3, exposure: 1.1 };
-const KEYS_C = ['skyTop', 'skyBottom', 'fog', 'sun', 'hemiSky', 'hemiGround', 'foliage', 'cloud'];
-const KEYS_N = ['fogNear', 'fogFar', 'sunInt', 'hemiInt', 'window', 'lamp', 'stars', 'sunDisc', 'moon', 'exposure'];
+const K_SUNSET = { sun: 0xFF9A6B, sunInt: 1.8, sunPos: [-95, 22, 35], hemiSky: 0xFFC2A8, hemiGround: 0x8A6A9E, hemiInt: 0.75, foliage: 0x9DBE78, window: 0.7, lamp: 0.55, stars: 0.12, exposure: 1.05 };
+const K_DUSK = { sun: 0xFF7F6B, sunInt: 0.8, sunPos: [-100, 14, 35], hemiSky: 0x8A7AC0, hemiGround: 0x3A2E56, hemiInt: 0.6, foliage: 0x5E8466, window: 1.3, lamp: 1.5, stars: 0.6, exposure: 1.1 };
+const KEYS_C = ['sun', 'hemiSky', 'hemiGround', 'foliage'];
+const KEYS_N = ['sunInt', 'hemiInt', 'window', 'lamp', 'stars', 'exposure'];
 const KF = [[0, K_NIGHT], [4.6, K_PREDAWN], [6.3, K_DAWN], [8.5, K_DAY], [15.5, K_DAY2], [17.8, K_SUNSET], [19.3, K_DUSK], [21, K_NIGHT], [24, K_NIGHT]]
   .map(([h, k]) => ({ h, n: k, c: Object.fromEntries(KEYS_C.map((key) => [key, new THREE.Color(k[key])])), sp: new THREE.Vector3(...k.sunPos) }));
 
@@ -161,8 +162,7 @@ function drawLabel(ctx, w, h, title, sub, color, dim, display = false, tag = nul
 // ------------------------------------------------------------ materials
 const TEX = {
   wood: TX.woodTexture(), terrazzo: TX.terrazzoTexture(), grass: TX.grassTexture(), fabric: TX.fabricTexture(),
-  rock: TX.rockTexture(), rug: TX.rugTexture(), keys: TX.keyboardTexture(), cloud: TX.cloudTexture(), moon: TX.moonTexture(),
-  city: TX.cityTextures(),
+  rock: TX.rockTexture(), rug: TX.rugTexture(), keys: TX.keyboardTexture(),
 };
 const M = {
   wood: new THREE.MeshStandardMaterial({ map: TEX.wood, roughness: 0.55, metalness: 0 }),
@@ -936,15 +936,16 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.autoClear = false;
+  renderer.setClearColor('#02030A');
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog('#ffffff', 60, 220);
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
   scene.environment = envTex;
 
-  const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 600);
+  const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 1500);
   camera.position.set(0, 52, 66);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -953,46 +954,8 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   controls.minDistance = 4;
   controls.maxDistance = 85;
 
-  // ---- sky
-  const skyU = { top: { value: new THREE.Color() }, bottom: { value: new THREE.Color() } };
-  const sky = new THREE.Mesh(new THREE.SphereGeometry(260, 32, 16), new THREE.ShaderMaterial({
-    uniforms: skyU, side: THREE.BackSide, depthWrite: false, fog: false, toneMapped: false,
-    vertexShader: 'varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }',
-    fragmentShader: 'uniform vec3 top; uniform vec3 bottom; varying vec3 vW; void main(){ float h = normalize(vW).y; float t = smoothstep(-0.08, 0.6, h); gl_FragColor = vec4(mix(bottom, top, t), 1.0); \n#include <colorspace_fragment>\n }',
-  }));
-  scene.add(sky);
-
-  const starGeo = new THREE.BufferGeometry();
-  {
-    const r = TX.rng(77), pts = [];
-    for (let i = 0; i < 1400; i++) {
-      const u = r() * Math.PI * 2, v = 0.06 + r() * 0.94;
-      const y = v, rad = Math.sqrt(1 - y * y);
-      pts.push(Math.cos(u) * rad * 240, y * 240, Math.sin(u) * rad * 240);
-    }
-    starGeo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-  }
-  const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: '#ffffff', size: 1.8, sizeAttenuation: false, transparent: true, depthWrite: false, fog: false, toneMapped: false }));
-  scene.add(stars);
-  const sunDisc = makeGlow('#FFF4E0', 46);
-  sunDisc.material.fog = false;
-  scene.add(sunDisc);
-  const moon = new THREE.Sprite(new THREE.SpriteMaterial({ map: TEX.moon, transparent: true, depthWrite: false, fog: false, toneMapped: false }));
-  moon.scale.setScalar(30);
-  moon.position.set(-70, 120, -170).normalize().multiplyScalar(230);
-  scene.add(moon);
-  const clouds = [];
-  {
-    const r = TX.rng(31);
-    for (let i = 0; i < 11; i++) {
-      const c = new THREE.Sprite(new THREE.SpriteMaterial({ map: TEX.cloud, transparent: true, depthWrite: false, fog: false, opacity: 0.9 }));
-      const a = r() * Math.PI * 2, rad = 120 + r() * 70;
-      c.userData = { a, rad, y: 40 + r() * 45, speed: 0.004 + r() * 0.006 };
-      c.scale.set(40 + r() * 30, 15 + r() * 10, 1);
-      clouds.push(c);
-      scene.add(c);
-    }
-  }
+  // ---- space: stars, the Earth, the Sun, stations, satellites and meteors
+  const space = createSpace({ renderer, scene, quality });
 
   // ---- lights
   const hemi = new THREE.HemisphereLight('#ffffff', '#ffffff', 1);
@@ -1049,30 +1012,6 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   rug.position.y = 0.012;
   rug.receiveShadow = true;
   scene.add(rug);
-
-  // window wall: pastel skyline by day, lit windows by night
-  const wallGeo = new THREE.CylinderGeometry(36, 36, 14, 128, 1, true, Math.PI * 0.55, Math.PI * 0.9);
-  const dayWallMat = new THREE.MeshBasicMaterial({ map: TEX.city.day, side: THREE.BackSide, fog: false, toneMapped: false });
-  const dayWall = new THREE.Mesh(wallGeo, dayWallMat);
-  dayWall.position.y = 7;
-  scene.add(dayWall);
-  const nightWallMat = new THREE.MeshBasicMaterial({ map: TEX.city.night, side: THREE.BackSide, fog: false, toneMapped: false, transparent: true, opacity: 0, depthWrite: false });
-  const nightWall = new THREE.Mesh(wallGeo, nightWallMat);
-  nightWall.position.y = 7;
-  nightWall.scale.setScalar(0.998);
-  nightWall.renderOrder = 1;
-  scene.add(nightWall);
-  {
-    const mats = [];
-    for (let i = 0; i <= 18; i++) {
-      const a = Math.PI * 0.55 + (Math.PI * 0.9 * i) / 18;
-      mats.push(local(Math.sin(a) * 35.8, 7, Math.cos(a) * 35.8, a));
-    }
-    scene.add(instanced(RB(0.28, 14, 0.28, 0.06), M.frame, mats, { shadow: false }));
-    const rail = new THREE.Mesh(new THREE.CylinderGeometry(35.85, 35.85, 0.35, 128, 1, true, Math.PI * 0.55, Math.PI * 0.9), M.frame);
-    rail.position.y = 0.17;
-    scene.add(rail);
-  }
 
   // ---- landmarks on the garden ring (kept clear of trees)
   const FOUNTAIN = new THREE.Vector3(-9, 0, 30.6);
@@ -1260,26 +1199,6 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     l.v.set(0, 0, 0);
     l.spin.set(Math.random() * 4 - 2, Math.random() * 4 - 2, Math.random() * 4 - 2);
     l.landed = false;
-  }
-
-  // a few birds circling high above
-  const birds = [];
-  {
-    const wingGeo = new THREE.BufferGeometry();
-    wingGeo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0.18, 0, 0, -0.12, 0.62, 0, 0.02], 3));
-    wingGeo.computeVertexNormals();
-    const birdMat = new THREE.MeshStandardMaterial({ color: '#3A3F4D', side: THREE.DoubleSide, roughness: 0.8 });
-    for (let i = 0; i < 7; i++) {
-      const b = new THREE.Group();
-      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.06, 0.25, 4, 8), birdMat);
-      body.rotation.x = Math.PI / 2;
-      const wl = new THREE.Mesh(wingGeo, birdMat), wr = new THREE.Mesh(wingGeo, birdMat);
-      wr.scale.x = -1;
-      b.add(body, wl, wr);
-      b.userData = { wl, wr, r: 22 + i * 3.5, y: 15 + (i % 3) * 2.5, a: i * 0.9, speed: 0.12 + (i % 4) * 0.03 };
-      birds.push(b);
-      scene.add(b);
-    }
   }
 
   // Grok Bot pavilion: one floating shape per reported bot
@@ -1631,30 +1550,16 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     env.hour = h;
     const k = sampleTime(h);
     const dayness = THREE.MathUtils.clamp((k.sunInt - 0.45) / 2.15, 0, 1);
-    skyU.top.value.copy(k.c.skyTop);
-    skyU.bottom.value.copy(k.c.skyBottom);
-    scene.background = k.c.skyBottom;
-    scene.fog.color.copy(k.c.fog);
-    scene.fog.near = k.fogNear * 0.5;
-    scene.fog.far = k.fogFar * 0.45;
     hemi.color.copy(k.c.hemiSky); hemi.groundColor.copy(k.c.hemiGround); hemi.intensity = k.hemiInt * 0.85;
     sun.color.copy(k.c.sun); sun.intensity = k.sunInt;
     sunDir.copy(k.sp).normalize();
     sun.position.copy(sunDir).multiplyScalar(60);
     sun.target.position.set(0, 0, 0);
-    sunDisc.position.copy(sunDir).multiplyScalar(230);
-    sunDisc.material.color.copy(k.c.sun);
-    sunDisc.material.opacity = k.sunDisc * 0.95;
-    moon.material.opacity = k.moon;
     renderer.toneMappingExposure = k.exposure;
     scene.environmentIntensity = (0.12 + 0.4 * dayness) * (quality === 'ultra' ? 1 : 0.7);
     M.leaf.color.copy(k.c.foliage);
-    for (const b of birds) b.visible = dayness > 0.25;
-    for (const c of clouds) { c.material.color.copy(k.c.cloud); c.material.opacity = 0.35 + 0.55 * dayness; }
-    stars.material.opacity = k.stars;
+    space.setTime(h, k, dayness);
     const win = THREE.MathUtils.clamp(k.window / 1.4, 0, 1);
-    nightWallMat.opacity = win;
-    dayWallMat.color.setScalar(0.3 + 0.7 * dayness);
     env.lamp = k.lamp;
     M.lampGlow.emissiveIntensity = k.lamp * 1.4;
     for (const s of streetGlows) s.material.opacity = Math.min(1, k.lamp * 0.38);
@@ -1680,6 +1585,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
       sun.shadow.map?.dispose(); sun.shadow.map = null;
     }
     detail.visible = quality === 'ultra';
+    space.setQuality(quality);
     resize();
     setTime(env.hour);
   }
@@ -1759,7 +1665,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   }
   function overview() {
     if (narrow()) flyTo(new THREE.Vector3(0, 0, 10), new THREE.Vector3(0, 62, 22), 1300);
-    else flyTo(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 30, 36), 1300);
+    else flyTo(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 26, 58), 1300);
   }
 
   // ---- picking
@@ -1827,11 +1733,6 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
       r1.rotation.x = Math.PI / 2 + Math.sin(t * 0.7) * 0.4; r1.rotation.y += dt * 0.8;
       r2.rotation.x = Math.PI / 2 + Math.cos(t * 0.5) * 0.5; r2.rotation.z += dt * 0.5;
       holo.position.y = 4.2 + Math.sin(t * 1.3) * 0.12;
-      for (const c of clouds) {
-        c.userData.a += c.userData.speed * dt;
-        c.position.set(Math.cos(c.userData.a) * c.userData.rad, c.userData.y, Math.sin(c.userData.a) * c.userData.rad);
-      }
-      stars.material.opacity = sampleStars(env.hour) * (0.85 + 0.15 * Math.sin(t * 2.3));
     }
     setPose(mu, 'sit-working', t, REDUCED_MOTION ? 0 : 1, dt);
     mu.rotation.y = Math.PI;
@@ -1843,6 +1744,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
       ag.update(t, dt, motion);
     }
     if (motion) animateWorld(t, dt);
+    space.update(t, dt, motion, camera);
 
     for (let i = packets.length - 1; i >= 0; i--) {
       const p = packets[i];
@@ -1850,9 +1752,12 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
       if (p.t >= 1) { scene.remove(p.mesh); p.mesh.material.dispose(); p.glow.material.dispose(); packets.splice(i, 1); continue; }
       p.mesh.position.copy(p.curve.getPoint(p.t));
     }
+    renderer.clear();
+    space.render(camera);
+    renderer.clearDepth();
     renderer.render(scene, camera);
   }
-  // wind gusts, swaying trees, leaves, fountain, birds, Grok bots, the gate portal
+  // wind gusts, swaying trees, leaves, fountain, Grok bots, the gate portal
   function animateWorld(t, dt) {
     wind.time.value = t;
     wind.strength.value = 0.45 + 0.25 * Math.sin(t * 0.13) + 0.35 * Math.max(0, Math.sin(t * 0.41) * Math.sin(t * 0.07 + 1)) ** 3;
@@ -1890,15 +1795,6 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     }
     spray.points.geometry.attributes.position.needsUpdate = true;
 
-    for (const b of birds) {
-      const u = b.userData;
-      u.a += u.speed * dt;
-      b.position.set(Math.cos(u.a) * u.r, u.y + Math.sin(t * 0.5 + u.r) * 1.2, Math.sin(u.a) * u.r);
-      b.rotation.y = -u.a;
-      const flap = Math.sin(t * 9 + u.r) * 0.6;
-      u.wl.rotation.z = flap; u.wr.rotation.z = -flap;
-    }
-
     gate.userData.portal.rotation.z += dt * 0.8;
     for (const e of grokBots.values()) {
       const p = e.home, st = e.status;
@@ -1910,9 +1806,6 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     }
   }
 
-  let starsCache = { h: null, v: 0 };
-  function sampleStars(h) { if (starsCache.h !== h) starsCache = { h, v: sampleTime(h).stars }; return starsCache.v; }
-
   renderer.setAnimationLoop(frame);
   document.addEventListener('visibilitychange', () => {
     renderer.setAnimationLoop(document.hidden ? null : frame);
@@ -1921,6 +1814,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
 
   if (new URLSearchParams(location.search).has('stats')) window.__officeStats = () => ({ ...renderer.info.render, programs: renderer.info.programs?.length });
   if (new URLSearchParams(location.search).has('stats')) window.__officeFocus = (id) => focus(id);
+  if (new URLSearchParams(location.search).has('stats')) window.__officeView = (x, y, z, tx = 0, ty = 0, tz = 0) => { camAnim = null; controls.target.set(tx, ty, tz); camera.position.set(x, y, z); };
   if (new URLSearchParams(location.search).has('stats')) window.__officeAgents = () => [...agents.values()].map((a) => ({ id: a.id.slice(0, 6), status: a.status, goal: a.goal, mode: a.mode, run: a.run, left: a.path.length, pos: a.avatar.position.toArray().map((n) => +n.toFixed(1)), visible: a.avatar.visible }));
 
   return {
