@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { supportsHdr, createPipeline, fitSunShadow, createOrbitEnvironment, createLightPools } from './render.js';
 import * as TX from './textures.js';
 import { createSpace } from './space.js';
 
@@ -30,13 +30,13 @@ let L = LABEL.light;
 
 // ------------------------------------------------------------ time of day
 // Minju City keyframes (hour -> look): they light the office; space.js moves the Sun round the Earth.
-const K_NIGHT = { sun: 0x9DB4FF, sunInt: 0.5, sunPos: [-40, 80, -60], hemiSky: 0x5466A8, hemiGround: 0x1C1830, hemiInt: 0.5, foliage: 0x3E6E58, window: 1.7, lamp: 2.2, stars: 1, exposure: 1.15 };
-const K_PREDAWN = { sun: 0x8FA6FF, sunInt: 0.45, sunPos: [100, 14, 35], hemiSky: 0x5A6BB0, hemiGround: 0x241E3C, hemiInt: 0.5, foliage: 0x4A7A60, window: 1.4, lamp: 1.8, stars: 0.55, exposure: 1.12 };
-const K_DAWN = { sun: 0xFFB98A, sunInt: 1.4, sunPos: [95, 24, 35], hemiSky: 0xFFD1B8, hemiGround: 0x8F7AA8, hemiInt: 0.8, foliage: 0x9CC48A, window: 0.7, lamp: 0.5, stars: 0.1, exposure: 1.05 };
+const K_NIGHT = { sun: 0x9DB4FF, sunInt: 0.5, sunPos: [-40, 80, -60], hemiSky: 0x5466A8, hemiGround: 0x2A2030, hemiInt: 0.72, foliage: 0x3E6E58, window: 1.7, lamp: 2.2, stars: 1, exposure: 1.15 };
+const K_PREDAWN = { sun: 0x8FA6FF, sunInt: 0.45, sunPos: [100, 14, 35], hemiSky: 0x5A6BB0, hemiGround: 0x2C223C, hemiInt: 0.64, foliage: 0x4A7A60, window: 1.4, lamp: 1.8, stars: 0.55, exposure: 1.12 };
+const K_DAWN = { sun: 0xFFB98A, sunInt: 1.4, sunPos: [95, 24, 35], hemiSky: 0xFFD1B8, hemiGround: 0x8F7AA8, hemiInt: 1.05, foliage: 0x9CC48A, window: 0.7, lamp: 0.5, stars: 0.1, exposure: 1.05 };
 const K_DAY = { sun: 0xFFF4E0, sunInt: 2.6, sunPos: [75, 70, 40], hemiSky: 0xDDEEFF, hemiGround: 0xFFE2EC, hemiInt: 1.05, foliage: 0x86D28F, window: 0, lamp: 0, stars: 0, exposure: 1.0 };
 const K_DAY2 = { ...K_DAY, sunPos: [-35, 78, 40] };
-const K_SUNSET = { sun: 0xFF9A6B, sunInt: 1.8, sunPos: [-95, 22, 35], hemiSky: 0xFFC2A8, hemiGround: 0x8A6A9E, hemiInt: 0.75, foliage: 0x9DBE78, window: 0.7, lamp: 0.55, stars: 0.12, exposure: 1.05 };
-const K_DUSK = { sun: 0xFF7F6B, sunInt: 0.8, sunPos: [-100, 14, 35], hemiSky: 0x8A7AC0, hemiGround: 0x3A2E56, hemiInt: 0.6, foliage: 0x5E8466, window: 1.3, lamp: 1.5, stars: 0.6, exposure: 1.1 };
+const K_SUNSET = { sun: 0xFFA574, sunInt: 1.8, sunPos: [-95, 22, 35], hemiSky: 0xFFD2BC, hemiGround: 0x8A6A9E, hemiInt: 1.0, foliage: 0x9DBE78, window: 0.7, lamp: 0.55, stars: 0.12, exposure: 1.05 };
+const K_DUSK = { sun: 0xFF7F6B, sunInt: 0.8, sunPos: [-100, 14, 35], hemiSky: 0x8A7AC0, hemiGround: 0x3A2E56, hemiInt: 0.8, foliage: 0x5E8466, window: 1.3, lamp: 1.5, stars: 0.6, exposure: 1.1 };
 const KEYS_C = ['sun', 'hemiSky', 'hemiGround', 'foliage'];
 const KEYS_N = ['sunInt', 'hemiInt', 'window', 'lamp', 'stars', 'exposure'];
 const KF = [[0, K_NIGHT], [4.6, K_PREDAWN], [6.3, K_DAWN], [8.5, K_DAY], [15.5, K_DAY2], [17.8, K_SUNSET], [19.3, K_DUSK], [21, K_NIGHT], [24, K_NIGHT]]
@@ -938,14 +938,25 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.autoClear = false;
   renderer.setClearColor('#02030A');
+  renderer.info.autoReset = false; // a frame is many render() calls now: frame() resets the counters once
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  scene.environment = envTex;
+  // HDR frame pipeline (render.js): bloom, ambient occlusion, one tone-mapping pass at the end.
+  // Labels, alert badges, progress rings and halos are UI: they skip all of that and draw last.
+  // Without float render targets the office is drawn straight to the canvas as before.
+  const isUi = (o) => o.material.toneMapped === false
+    && ((o.isSprite && o.material.map !== glowTexture && o.material.blending !== THREE.AdditiveBlending)
+      || (o.isMesh && o.geometry.type === 'RingGeometry'));
+  const query = new URLSearchParams(location.search); // ?direct forces the old straight-to-canvas path, to compare or to debug
+  const pipeline = supportsHdr(renderer) && !query.has('direct') ? createPipeline(renderer, { isUi, stats: query.has('stats') }) : null;
+  // what the office reflects: space, the Earth, its own floor and the key light (repainted in setTime)
+  const EARTH_DIR = new THREE.Vector3(0, -Math.sin(52 * Math.PI / 180), -Math.cos(52 * Math.PI / 180)); // as in space.js
+  const orbitEnv = createOrbitEnvironment(renderer, { earthDir: EARTH_DIR, earthAngle: 44 * Math.PI / 180 });
 
-  const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 1500);
+  // near 0.4: nothing comes closer (minDistance 4), and it buys 4x the depth precision at the
+  // island's far edge, where the grass sits 8 mm above the floor
+  const camera = new THREE.PerspectiveCamera(42, 1, 0.4, 1500);
   camera.position.set(0, 52, 66);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -953,6 +964,9 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   controls.maxPolarAngle = 1.32;
   controls.minDistance = 4;
   controls.maxDistance = 85;
+  // panning may not carry the target off the island (and the camera under it); see frame()
+  let userCam = false;
+  controls.addEventListener('start', () => { userCam = true; camAnim = null; }); // a drag wins over a fly-to
 
   // ---- space: stars, the Earth, the Sun, stations, satellites and meteors
   const space = createSpace({ renderer, scene, quality });
@@ -960,12 +974,26 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   // ---- lights
   const hemi = new THREE.HemisphereLight('#ffffff', '#ffffff', 1);
   scene.add(hemi);
+  // key: the sun, the only shadow caster
   const sun = new THREE.DirectionalLight('#ffffff', 1);
   sun.castShadow = true;
-  Object.assign(sun.shadow.camera, { left: -30, right: 30, top: 30, bottom: -30, near: 1, far: 140 });
-  sun.shadow.bias = -0.0003;
-  sun.shadow.normalBias = 0.03;
   scene.add(sun, sun.target);
+  // Shadow tuning, all in one place. The box is refitted to the island in setTime (fitSunShadow).
+  // Striped or speckled floor (acne): raise slopeTexels. Shadows detached from thin legs: lower
+  // normalBiasTexels. Something tall loses its shadow: raise yMax.
+  const SHADOW = {
+    mapSize: { ultra: 4096, standard: 1536 },
+    radius: 36.6, yMin: -0.5, yMax: 9,   // the island disc and its tallest casters
+    normalBiasTexels: 1.0,               // receivers move along their normal by this many texels
+    slopeTexels: 0.9,                    // depth bias, in texels of floor slope as the sun sees it (0.4 was still clean)
+    minBias: 0.004,                      // metres, on top of the slope term
+  };
+  // rim: cool back light opposite the sun, so avatars and furniture separate from the floor
+  const rim = new THREE.DirectionalLight('#A9C7FF', 0);
+  // earthshine: blue bounce from the Earth, ahead of the island and below it
+  const earthshine = new THREE.DirectionalLight('#5E9BFF', 0);
+  earthshine.position.copy(EARTH_DIR).multiplyScalar(50);
+  scene.add(rim, earthshine);
   const minjuLight = new THREE.PointLight('#FF8FB8', 4, 16, 1.6);
   minjuLight.position.set(0, 4.5, 0);
   scene.add(minjuLight);
@@ -1544,25 +1572,82 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   }
 
   // ---- time of day
+  // ---- lamps at night: a pool of light on the ground under each one (both tiers), and on ultra
+  // three real point lights that sit in whichever lamps are nearest to what the camera looks at
+  const lampSpots = [
+    ...streetGlows.map((s) => ({ position: s.position.clone(), power: 10, range: 13, d: 0 })),
+    // desk lamps: the bulb hangs 0.25 m along the arm, 0.35 m over the desk top (see propTemplates)
+    ...props.lamp.map((m) => ({ position: new THREE.Vector3(0.25, 0.3, 0).applyMatrix4(m), power: 0.12, range: 3, d: 0 })),
+  ];
+  const lampPools = createLightPools([
+    ...streetGlows.map((s) => ({ position: new THREE.Vector3(s.position.x, 0.03, s.position.z), radius: 6.5 })),
+    ...props.lamp.map((m) => ({ position: new THREE.Vector3(0.25, 0.008, 0).applyMatrix4(m), radius: 0.45 })),
+  ], '#FFB870');
+  scene.add(lampPools.mesh);
+  const lampLights = [0, 1, 2].map(() => {
+    const l = new THREE.PointLight('#FFC58A', 0, 12, 1.8);
+    scene.add(l);
+    return l;
+  });
+  function updateLampLights() {
+    // only in close-ups: from the overview every lamp must look the same
+    const zoom = 1 - THREE.MathUtils.smoothstep(camera.position.distanceTo(controls.target), 16, 34);
+    if (quality !== 'ultra' || env.lamp < 0.02 || zoom <= 0) { for (const l of lampLights) l.intensity = 0; return; }
+    for (const s of lampSpots) s.d = s.position.distanceTo(controls.target);
+    lampSpots.sort((a, b) => a.d - b.d);
+    // a light fades to nothing before it hops to another lamp: the weight is zero at the 4th nearest
+    const edge = lampSpots[lampLights.length].d;
+    lampLights.forEach((l, i) => {
+      const s = lampSpots[i];
+      l.position.copy(s.position);
+      l.distance = s.range;
+      l.intensity = s.power * env.lamp * zoom * THREE.MathUtils.clamp((edge - s.d) / 2.5, 0, 1);
+    });
+  }
+
+  const ENV_SKY = 0.3; // how much of the hemisphere fill the reflections see overhead
   const env = { lamp: 0, glowGain: 0.5, additive: null, hour };
   const sunDir = new THREE.Vector3();
   function setTime(h) {
     env.hour = h;
     const k = sampleTime(h);
     const dayness = THREE.MathUtils.clamp((k.sunInt - 0.45) / 2.15, 0, 1);
+    const night = THREE.MathUtils.clamp(k.lamp / 2.2, 0, 1);
     hemi.color.copy(k.c.hemiSky); hemi.groundColor.copy(k.c.hemiGround); hemi.intensity = k.hemiInt * 0.85;
     sun.color.copy(k.c.sun); sun.intensity = k.sunInt;
     sunDir.copy(k.sp).normalize();
-    sun.position.copy(sunDir).multiplyScalar(60);
-    sun.target.position.set(0, 0, 0);
+    const fit = fitSunShadow(sun, sunDir, { ...SHADOW, mapSize: sun.shadow.mapSize.x });
+    sun.shadow.normalBias = fit.texel * SHADOW.normalBiasTexels;
+    sun.shadow.bias = -(SHADOW.minBias + fit.floorSlope * SHADOW.slopeTexels) / fit.depth;
+    rim.position.set(-sunDir.x, 0.6 * Math.hypot(sunDir.x, sunDir.z) + 0.15, -sunDir.z).multiplyScalar(50);
+    rim.intensity = 0.3 + 0.3 * dayness;
+    earthshine.intensity = 0.1 + 0.45 * dayness; // the Earth's day side faces us by day
     renderer.toneMappingExposure = k.exposure;
-    scene.environmentIntensity = (0.12 + 0.4 * dayness) * (quality === 'ultra' ? 1 : 0.7);
+    // the environment carries its own brightness per hour, so its intensity stays put
+    scene.environmentIntensity = 1;
+    const sunLin = k.c.sun.clone().multiplyScalar(k.sunInt), skyLin = k.c.hemiSky.clone().multiplyScalar(k.hemiInt * 0.85);
+    const floorLin = sunLin.clone().multiplyScalar(Math.max(sunDir.y, 0)).add(skyLin).multiplyScalar(0.8 / Math.PI);
+    orbitEnv.set(h, {
+      sunDir: sunDir.clone(),
+      sun: sunLin.multiplyScalar(2.2).toArray(),
+      sky: skyLin.clone().multiplyScalar(ENV_SKY).toArray(),
+      floor: [floorLin.r, floorLin.g * 0.97, floorLin.b * 0.95],
+      earth: [0.10, 0.24, 0.6].map((v) => v * (0.12 + 1.0 * dayness)),
+    });
+    lampPools.set(k.lamp * 0.16);
+    if (pipeline) {
+      // only what is brighter than the sunlit floor blooms: a high bar by day, lower and wider at night
+      Object.assign(pipeline.look, {
+        threshold: 1.1 + 1.1 * dayness, knee: 0.5, bloom: 0.2 - 0.09 * dayness, spread: 0.62,
+        ao: 0.75, saturation: 1.04, contrast: 0.06, vignette: 0.14 + 0.1 * night,
+      });
+    }
     M.leaf.color.copy(k.c.foliage);
     space.setTime(h, k, dayness);
     const win = THREE.MathUtils.clamp(k.window / 1.4, 0, 1);
     env.lamp = k.lamp;
     M.lampGlow.emissiveIntensity = k.lamp * 1.4;
-    for (const s of streetGlows) s.material.opacity = Math.min(1, k.lamp * 0.38);
+    for (const s of streetGlows) s.material.opacity = Math.min(1, k.lamp * (pipeline ? 0.34 : 0.38)); // bloom adds its own
     minjuLight.intensity = 4 + k.window * 10;
     env.glowGain = 0.5 + 0.5 * (1 - dayness);
     const additive = win > 0.5;
@@ -1578,8 +1663,9 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   // ---- quality
   function setQuality(q) {
     quality = q === 'standard' ? 'standard' : 'ultra';
-    renderer.setPixelRatio(Math.min(devicePixelRatio, quality === 'ultra' ? 2 : 1.25));
-    const size = quality === 'ultra' ? 4096 : 1536;
+    pipeline?.setQuality(quality);
+    for (const l of lampLights) l.visible = quality === 'ultra'; // standard does not pay for them at all
+    const size = Math.min(SHADOW.mapSize[quality], renderer.capabilities.maxTextureSize);
     if (sun.shadow.mapSize.x !== size) {
       sun.shadow.mapSize.set(size, size);
       sun.shadow.map?.dispose(); sun.shadow.map = null;
@@ -1695,14 +1781,26 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     renderer.domElement.style.cursor = pick(e) ? 'pointer' : 'grab';
   });
 
+  // Device pixels are capped per tier, and by a pixel budget on top: the HDR targets cost several
+  // times what the bare canvas did, so a 5K window must not quietly allocate a gigabyte.
+  function pixelRatio(w, h) {
+    const cap = quality === 'ultra' ? 2 : 1.25, budget = quality === 'ultra' ? 6.5e6 : 3.3e6;
+    return Math.min(devicePixelRatio, Math.max(1, Math.min(cap, Math.sqrt(budget / Math.max(1, w * h)))));
+  }
   function resize() {
     const w = container.clientWidth, h = container.clientHeight;
+    if (!w || !h) return;
+    renderer.setPixelRatio(pixelRatio(w, h)); // the pipeline's targets follow the drawing buffer on the next frame
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.fov = w < 700 ? 55 : 42;
     camera.updateProjectionMatrix();
   }
   new ResizeObserver(resize).observe(container);
+  // devicePixelRatio can change with no resize at all (browser zoom, a move to another monitor)
+  (function watchDpr() {
+    matchMedia(`(resolution: ${devicePixelRatio}dppx)`).addEventListener('change', () => { resize(); watchDpr(); }, { once: true });
+  })();
 
   drawMinjuLabel();
   drawGrokLabel();
@@ -1717,6 +1815,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   function frame() {
     const dt = Math.min(clock.getDelta(), 0.2) * TIME_SCALE; // tolerate slow frames without teleporting after a tab switch
     const t = clock.elapsedTime;
+    renderer.info.reset();
     if (camAnim) {
       const k = Math.min(1, (performance.now() - camAnim.t0) / camAnim.ms);
       const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
@@ -1724,7 +1823,15 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
       camera.position.lerpVectors(camAnim.fromC, camAnim.toC, e);
       if (k >= 1) camAnim = null;
     }
+    if (userCam) {
+      // keep the pivot on the island: no panning off into space or under the floor
+      const tg = controls.target, r = Math.hypot(tg.x, tg.z);
+      if (r > 38) { tg.x *= 38 / r; tg.z *= 38 / r; }
+      tg.y = THREE.MathUtils.clamp(tg.y, 0, 10);
+    }
     controls.update();
+    updateLampLights();
+    orbitEnv.update(performance.now(), scene);
 
     const { holo, core, r1, r2 } = minju.userData.holo;
     const mu = minju.userData.avatar;
@@ -1752,10 +1859,14 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
       if (p.t >= 1) { scene.remove(p.mesh); p.mesh.material.dispose(); p.glow.material.dispose(); packets.splice(i, 1); continue; }
       p.mesh.position.copy(p.curve.getPoint(p.t));
     }
-    renderer.clear();
-    space.render(camera);
-    renderer.clearDepth();
-    renderer.render(scene, camera);
+    if (pipeline) {
+      pipeline.render(scene, camera, (prepare) => space.render(camera, prepare));
+    } else {
+      renderer.clear();
+      space.render(camera);
+      renderer.clearDepth();
+      renderer.render(scene, camera);
+    }
   }
   // wind gusts, swaying trees, leaves, fountain, Grok bots, the gate portal
   function animateWorld(t, dt) {
@@ -1812,9 +1923,16 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     if (!document.hidden) clock.getDelta();
   });
 
-  if (new URLSearchParams(location.search).has('stats')) window.__officeStats = () => ({ ...renderer.info.render, programs: renderer.info.programs?.length });
+  // Whole-frame totals: frame() resets the counters once per frame, so calls and triangles now
+  // include space, the shadow map, the post passes and the UI layer. `stages.office` is the office
+  // pass alone, which is what this used to report.
+  if (new URLSearchParams(location.search).has('stats')) window.__officeStats = () => ({ ...renderer.info.render, programs: renderer.info.programs?.length, stages: pipeline?.counts, pipeline: pipeline ? pipeline.describe() : 'direct' });
+  if (new URLSearchParams(location.search).has('stats')) window.__officeTime = (h) => setTime(h);
+  if (new URLSearchParams(location.search).has('stats')) window.__officeQuality = (q) => setQuality(q);
+  if (new URLSearchParams(location.search).has('stats')) window.__officeLook = (o) => Object.assign(pipeline?.look ?? {}, o);
+  if (new URLSearchParams(location.search).has('stats')) window.__officeLights = { hemi, sun, rim, earthshine, lampLights, lampPools, renderer, scene, SHADOW };
   if (new URLSearchParams(location.search).has('stats')) window.__officeFocus = (id) => focus(id);
-  if (new URLSearchParams(location.search).has('stats')) window.__officeView = (x, y, z, tx = 0, ty = 0, tz = 0) => { camAnim = null; controls.target.set(tx, ty, tz); camera.position.set(x, y, z); };
+  if (new URLSearchParams(location.search).has('stats')) window.__officeView = (x, y, z, tx = 0, ty = 0, tz = 0) => { camAnim = null; userCam = false; controls.target.set(tx, ty, tz); camera.position.set(x, y, z); };
   if (new URLSearchParams(location.search).has('stats')) window.__officeAgents = () => [...agents.values()].map((a) => ({ id: a.id.slice(0, 6), status: a.status, goal: a.goal, mode: a.mode, run: a.run, left: a.path.length, pos: a.avatar.position.toArray().map((n) => +n.toFixed(1)), visible: a.avatar.visible }));
 
   return {
