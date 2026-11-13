@@ -36,19 +36,40 @@ float fbm(vec3 p, int oct) {
   return s;
 }`;
 
-// One shader, three passes: 0 = Earth surface (sRGB albedo + city lights in alpha),
-// 1 = clouds (r) and ocean mask (g), 2 = sky (sRGB). Pixel (u, v) maps to the same direction
-// as SphereGeometry's uv, so the textures wrap the spheres exactly.
+// One shader, four passes: 0 = Earth surface (sRGB albedo + city glow in alpha), 1 = clouds (r),
+// ocean mask (g) and the slope of the terrain (b east, a north), 2 = sky (sRGB), 3 = the terrain
+// height that pass 1 differentiates (scratch, 16 bits in two channels). Pixel (u, v) maps to the
+// same direction as SphereGeometry's uv, so the textures wrap the spheres exactly.
 const BAKE = /* glsl */ `
-uniform float uPass;
+uniform float uPass; uniform sampler2D uRelief;
 varying vec2 vUv;
 const float PI = 3.141592653589793;
 const float LAND = 0.584;
 ${NOISE}
+// Mountain chains run along the mid-level contour of a slow noise, in broken stretches.
+// Three octaves and a soft top: see reliefAt.
+float crest(vec3 p, vec3 q) {
+  float line = 1.0 - smoothstep(0.0, 0.035, abs(fbm(p * 7.0 + q * 0.8 + 3.0, 3) / 0.875 - 0.5));
+  return line * smoothstep(0.38, 0.56, fbm(p * 4.0 + 9.0, 2) / 0.75);
+}
+// Terrain height as the Earth shader lights it: a step up at the coast, rolling hills and the
+// mountain chains. It leaves out the finest octaves of the real height on purpose: its slope is
+// stored at half size and magnified a lot on screen, so anything near a texel wide shades as blocks.
+float reliefAt(vec3 p) {
+  vec3 q = vec3(fbm(p * 1.6 + 4.0, 5), fbm(p * 1.6 + 11.3, 5), fbm(p * 1.6 + 23.7, 5));
+  float hs = fbm(p * 1.3 + q * 1.4, 4) + 0.027 - LAND;
+  return smoothstep(-0.01, 0.03, hs) * (0.15 + 0.14 * fbm(p * 14.0 + 6.0, 2) + clamp(hs, 0.0, 0.2) * 2.5 + smoothstep(0.03, 0.1, hs) * crest(p, q) * 0.1);
+}
+float reliefTex(vec2 uv) { vec2 t = texture2D(uRelief, uv).rg; return t.r + t.g / 255.0; }
 void main() {
   float th = PI * (1.0 - vUv.y), ph = 2.0 * PI * vUv.x;
   vec3 p = vec3(-cos(ph) * sin(th), cos(th), sin(ph) * sin(th));
 
+  if (uPass > 2.5) {
+    float h = reliefAt(p) * 254.0;
+    gl_FragColor = vec4(floor(h) / 255.0, fract(h), 0.0, 1.0);
+    return;
+  }
   if (uPass > 1.5) {
     vec3 bandN = normalize(vec3(0.42, 0.8, -0.42));
     float b = dot(p, bandN);
@@ -74,21 +95,35 @@ void main() {
     float c = fbm(p * 2.2 + w, 6) + 0.07 * cos(p.y * 9.0);
     float wisps = fbm(p * vec3(9.0, 22.0, 9.0) + 3.0, 5);
     float cloud = smoothstep(0.55, 0.69, c) * 0.88 + smoothstep(0.6, 0.78, wisps) * 0.3 * smoothstep(0.45, 0.56, c);
-    gl_FragColor = vec4(clamp(cloud, 0.0, 1.0), 1.0 - land, 0.0, 1.0);
+    // slope of the terrain per radian, east and north: central differences one texel either way
+    vec2 tx = vec2(dFdx(vUv.x), dFdy(vUv.y));
+    vec2 slope = vec2((reliefTex(vUv + vec2(tx.x, 0.0)) - reliefTex(vUv - vec2(tx.x, 0.0))) / (4.0 * PI * tx.x * max(sin(th), 0.06)),
+                      (reliefTex(vUv + vec2(0.0, tx.y)) - reliefTex(vUv - vec2(0.0, tx.y))) / (2.0 * PI * tx.y));
+    gl_FragColor = vec4(clamp(cloud, 0.0, 1.0), 1.0 - land, clamp(slope / 24.0, -1.0, 1.0) * 0.5 + 128.0 / 255.0);
     return;
   }
 
+  // the same crests as reliefAt, so the bare rock sits where the shading puts the mountains
+  float peaks = smoothstep(LAND + 0.03, LAND + 0.1, hgt) * crest(p, q);
+  float alt = hgt - LAND + peaks * 0.05;
   float shelf = smoothstep(LAND - 0.06, LAND, hgt);
-  vec3 ocean = mix(vec3(0.003, 0.014, 0.06), vec3(0.012, 0.07, 0.17), shelf);
-  ocean = mix(ocean, vec3(0.03, 0.18, 0.26), shelf * shelf * shelf * 0.7);
+  // open water: currents drift between navy and teal, the tropics are a shade lighter
+  float cur = fbm(p * 3.0 + q * 2.0 + 5.0, 3);
+  vec3 deep = mix(vec3(0.004, 0.012, 0.062), vec3(0.003, 0.03, 0.075), smoothstep(0.34, 0.56, cur));
+  deep *= 0.72 + 0.65 * smoothstep(0.28, 0.6, fbm(p * 6.0 + q * 3.0, 3));
+  deep = mix(deep, vec3(0.008, 0.04, 0.1), (1.0 - smoothstep(0.1, 0.6, lat)) * 0.4);
+  vec3 ocean = mix(deep, vec3(0.012, 0.07, 0.17), shelf);
+  ocean = mix(ocean, vec3(0.03, 0.2, 0.27), shelf * shelf * shelf * 0.78);
   float dry = fbm(p * 4.0 + 11.0, 5);
   float belt = 1.0 - smoothstep(0.0, 0.17, abs(lat - 0.33));
   float desert = smoothstep(0.47, 0.6, dry * 0.75 + belt * 0.42 - (hgt - LAND) * 0.6);
   vec3 green = mix(vec3(0.035, 0.12, 0.04), vec3(0.16, 0.22, 0.08), smoothstep(0.35, 0.65, dry));
   vec3 lc = mix(green, vec3(0.5, 0.37, 0.22), desert);
-  lc = mix(lc, vec3(0.26, 0.23, 0.2), smoothstep(LAND + 0.07, LAND + 0.13, hgt));
+  lc = mix(lc, vec3(0.26, 0.23, 0.2), smoothstep(0.06, 0.12, alt));
   lc = mix(lc, vec3(0.13, 0.15, 0.1), smoothstep(0.58, 0.78, lat) * (1.0 - desert));
-  lc *= 0.85 + 0.3 * fbm(p * 30.0, 3);
+  float grain = fbm(p * 30.0, 4);
+  lc *= 0.8 + 0.4 * grain;
+  lc = mix(lc, vec3(0.42, 0.4, 0.39), peaks * 0.4 * (0.4 + 1.2 * grain)); // pale, broken rock along the crests
   vec3 col = mix(ocean, lc, land);
   float ice = smoothstep(0.89, 0.94, lat + (fbm(p * 6.0, 4) - 0.5) * 0.12);
   col = mix(col, vec3(0.82, 0.88, 0.94), ice);
@@ -96,7 +131,9 @@ void main() {
   float coast = 1.0 - smoothstep(LAND, LAND + 0.05, hgt);
   float region = smoothstep(0.52, 0.7, fbm(p * 6.0 + 2.0, 4) + coast * 0.12) * (1.0 - smoothstep(0.62, 0.8, lat)) * (1.0 - desert * 0.75);
   float dots = smoothstep(0.6, 0.82, noise(p * 150.0)) + 0.7 * smoothstep(0.68, 0.9, noise(p * 330.0));
-  float city = land * (1.0 - ice) * region * (0.2 + dots);
+  // roads: thin threads of light between the towns
+  float roads = (1.0 - smoothstep(0.0, 0.035, abs(fbm(p * 40.0 + 8.0, 2) / 0.75 - 0.5))) * 0.5;
+  float city = land * (1.0 - ice) * region * (0.12 + dots + roads);
   gl_FragColor = vec4(pow(col, vec3(1.0 / 2.2)), clamp(city, 0.0, 1.0));
 }`;
 
@@ -106,8 +143,12 @@ function bake(renderer, size) {
     wrapS: THREE.RepeatWrapping, wrapT: THREE.ClampToEdgeWrapping, depthBuffer: false, anisotropy: 8,
   });
   const targets = [mk(size, size / 2), mk(size / 2, size / 4), mk(2048, 1024)];
+  // scratch: terrain height at the cloud map's size, read back texel for texel by pass 1
+  const relief = new THREE.WebGLRenderTarget(size / 2, size / 4, {
+    minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, wrapS: THREE.RepeatWrapping, depthBuffer: false,
+  });
   const mat = new THREE.ShaderMaterial({
-    uniforms: { uPass: { value: 0 } }, depthTest: false, depthWrite: false,
+    uniforms: { uPass: { value: 0 }, uRelief: { value: null } }, depthTest: false, depthWrite: false,
     vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
     fragmentShader: BAKE,
   });
@@ -117,40 +158,89 @@ function bake(renderer, size) {
   sc.add(quad);
   const cam = new THREE.Camera();
   const prev = renderer.getRenderTarget();
+  mat.uniforms.uPass.value = 3; renderer.setRenderTarget(relief); renderer.render(sc, cam);
+  mat.uniforms.uRelief.value = relief.texture;
   targets.forEach((rt, i) => { mat.uniforms.uPass.value = i; renderer.setRenderTarget(rt); renderer.render(sc, cam); });
   renderer.setRenderTarget(prev);
-  quad.geometry.dispose(); mat.dispose();
+  quad.geometry.dispose(); mat.dispose(); relief.dispose();
   return { surface: targets[0].texture, clouds: targets[1].texture, sky: targets[2].texture };
 }
 
 const EARTH_VS = /* glsl */ `
-varying vec2 vUv; varying vec3 vN; varying vec3 vW;
+varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying vec3 vT; varying vec3 vP;
 void main() {
   vUv = uv;
+  vP = normalize(position);
   vN = normalize(mat3(modelMatrix) * normal);
+  vT = mat3(modelMatrix) * vec3(position.z, 0.0, -position.x); // east: the way u grows on SphereGeometry
   vec4 w = modelMatrix * vec4(position, 1.0);
   vW = w.xyz;
   gl_Position = projectionMatrix * viewMatrix * w;
 }`;
 
+// The baked maps are only magnified on screen, so everything that should stay sharp up close is
+// done here: terrain relief from the baked slope, cloud shadows cast away from the Sun, and city
+// lights broken into pin-points finer than a texel.
 const EARTH_FS = /* glsl */ `
 uniform sampler2D uSurf; uniform sampler2D uCloud;
 uniform vec3 uL; uniform vec3 uCam; uniform float uCloudOff; uniform float uCity;
-varying vec2 vUv; varying vec3 vN; varying vec3 vW;
+varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying vec3 vT; varying vec3 vP;
+float hash2(vec2 p) { vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+#ifdef DETAIL
+${NOISE}
+// two scales, the finer one turned off the axes of the first so that no lattice shows
+const mat3 TURN = mat3(0.36, 0.48, -0.8, -0.8, 0.6, 0.0, 0.48, 0.64, 0.6);
+float terrain(vec3 p) { return noise(p) * 0.5 + noise(TURN * p * 2.3 + 4.1) * 0.5; }
+#endif
 void main() {
   vec4 s = texture2D(uSurf, vUv);
   vec3 alb = pow(s.rgb, vec3(2.2));
-  float cl = texture2D(uCloud, vUv + vec2(uCloudOff, 0.0)).r;
-  float ocean = texture2D(uCloud, vUv).g;
+  vec4 geo = texture2D(uCloud, vUv);              // g: ocean, ba: terrain slope
+  vec2 cuv = vUv + vec2(uCloudOff, 0.0);
+  float cl = texture2D(uCloud, cuv).r;
+  float ocean = geo.g;
   vec3 n = normalize(vN), V = normalize(uCam - vW);
+  vec3 T = normalize(vT - n * dot(vT, n)), B = cross(n, T);
   float ndl = dot(n, uL);
-  float lit = max(ndl, 0.0);
   float day = smoothstep(-0.08, 0.22, ndl);
-  vec3 col = alb * (lit * 1.9 + 0.01);
+
+  // relief: tilt the normal down the baked slope, so ranges and coasts shade towards the terminator
+  vec2 slope = (geo.ba - 128.0 / 255.0) * 2.0;
+#ifdef DETAIL
+  // Ultra: grain the land per pixel, in the Earth's own space so it turns with the continents
+  // (rougher in some regions than others, or it reads as one even coat of sandpaper)
+  vec3 To = normalize(vec3(vP.z, 0.0, -vP.x)), Bo = cross(vP, To), dp = vP * 115.0;
+  float d0 = terrain(dp), landK = (1.0 - ocean) * (0.25 + 0.75 * smoothstep(0.3, 0.7, noise(vP * 19.0 + 2.0)));
+  slope += vec2(terrain(dp + To * 0.3) - d0, terrain(dp + Bo * 0.3) - d0) * 0.75 * landK;
+  alb *= 1.0 + (d0 - 0.5) * 0.24 * landK;
+#endif
+  vec3 nr = normalize(n - (T * slope.x + B * slope.y) * 0.7);
+  float lit = max(mix(dot(nr, uL), ndl, 0.35), 0.0);
+
+  // cloud shadows: look for cloud a little way towards the Sun, further when it is low
+  vec2 lt = vec2(dot(uL, T), dot(uL, B));
+  vec2 toSun = lt * vec2(0.5 / max(length(vP.xz), 0.08), 1.0) * (0.0016 / max(ndl, 0.16));
+  float shade = texture2D(uCloud, cuv + toSun).r;
+
+  vec3 col = alb * (lit * 1.9 + 0.01) * (1.0 - 0.6 * shade * day);
   vec3 H = normalize(uL + V);
-  col += ocean * (1.0 - cl) * pow(max(dot(n, H), 0.0), 160.0) * 0.5 * day * vec3(1.0, 0.88, 0.72);
-  col = mix(col, vec3(0.92, 0.94, 0.97) * (lit * 0.95 + 0.006), cl * 0.88);
-  col += s.a * (1.0 - day) * (1.0 - cl * 0.8) * vec3(1.0, 0.6, 0.27) * 1.5 * uCity;
+  float ndh = max(dot(n, H), 0.0);
+  col += ocean * (1.0 - cl) * (1.0 - shade) * (pow(ndh, 160.0) * 0.5 + pow(ndh, 22.0) * 0.035) * day * vec3(1.0, 0.88, 0.72);
+  // clouds: thicker towards the Sun means this bit is in shade
+  float cloudLit = max(ndl, 0.0) * (1.0 - 0.32 * clamp((shade - cl) * 2.0 + 0.15, 0.0, 1.0));
+  col = mix(col, vec3(0.92, 0.94, 0.97) * (cloudLit * 0.98 + 0.006), cl * 0.88);
+
+  // city lights: the bake gives the glow of a region, the grid turns it into separate lamps
+  // (fewer cells per row towards the poles, so that they stay square on the ground)
+  float row = floor(vUv.y * 1200.0);
+  vec2 cg = vec2(vUv.x * max(6.0, floor(2400.0 * sin(3.14159265 * (row + 0.5) / 1200.0))), vUv.y * 1200.0);
+  vec2 ci = vec2(floor(cg.x), row);
+  float rnd = hash2(ci);
+  vec2 cf = fract(cg) - 0.5 - (vec2(hash2(ci + 3.1), hash2(ci + 7.3)) - 0.5) * 0.56; // off the lattice, still inside the cell
+  float pin = smoothstep(0.22, 0.04, length(cf)) * smoothstep(0.3, 0.75, rnd);
+  float cityL = s.a * 0.7 + smoothstep(0.03, 0.4, s.a) * pin * 3.6;
+  col += cityL * (1.0 - day) * (1.0 - cl * 0.8) * mix(vec3(1.0, 0.56, 0.24), vec3(1.0, 0.82, 0.55), pin) * 1.3 * uCity;
+
   float mu = max(dot(n, V), 0.0);
   float fr = pow(1.0 - mu, 3.0);
   col += vec3(0.01, 0.03, 0.08) * day * fr;
@@ -280,6 +370,7 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
     },
     vertexShader: EARTH_VS, fragmentShader: EARTH_FS,
   });
+  if (quality === 'ultra') earthMat.defines.DETAIL = 1; // per-pixel terrain grain: seven noise taps
   // poles off to the side, so we look down on the tropics rather than an ice cap
   const upP = new THREE.Vector3(0, 1, 0).addScaledVector(EARTH_DIR, -EARTH_DIR.y).normalize();
   const rightP = new THREE.Vector3().crossVectors(EARTH_DIR, upP).normalize();
@@ -342,14 +433,18 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
   // ================================================================ near: in the office scene
   const near = new THREE.Group();
   scene.add(near);
+  // PBR sets (see textures.js): plated hull, crinkled foil, glassy cells, tubular truss, cratered rock
+  const SET = { hull: TX.hullSet(), foil: TX.foilSet(), solar: TX.solarSet(), truss: TX.trussSet(), rock: TX.asteroidSet() };
+  const bump = (v) => new THREE.Vector2(v, v);
   const M = {
-    white: new THREE.MeshStandardMaterial({ color: '#E8E9EE', roughness: 0.45, metalness: 0.15 }),
-    metal: new THREE.MeshStandardMaterial({ color: '#9AA1AD', roughness: 0.3, metalness: 0.85 }),
+    white: new THREE.MeshStandardMaterial({ ...SET.hull, roughness: 1, metalness: 0.15, normalScale: bump(0.8) }),
+    metal: new THREE.MeshStandardMaterial({ color: '#9AA1AD', roughnessMap: SET.hull.roughnessMap, roughness: 0.62, metalness: 0.85 }),
     dark: new THREE.MeshStandardMaterial({ color: '#2A2F3B', roughness: 0.5, metalness: 0.5 }),
-    foil: new THREE.MeshStandardMaterial({ map: TX.foilTexture(), roughness: 0.32, metalness: 1 }),
-    solar: new THREE.MeshStandardMaterial({ map: TX.solarPanelTexture(), roughness: 0.28, metalness: 0.55, side: THREE.DoubleSide, emissive: '#0B1A3C', emissiveIntensity: 0.4 }),
-    truss: new THREE.MeshStandardMaterial({ map: TX.trussTexture(), roughness: 0.4, metalness: 0.7, alphaTest: 0.5, side: THREE.DoubleSide }),
+    foil: new THREE.MeshStandardMaterial({ ...SET.foil, roughness: 1, metalness: 1, normalScale: bump(0.75) }),
+    solar: new THREE.MeshStandardMaterial({ ...SET.solar, roughness: 1, metalness: 1, normalScale: bump(0.6), side: THREE.DoubleSide, emissive: '#0B1A3C', emissiveIntensity: 0.4 }),
+    truss: new THREE.MeshStandardMaterial({ ...SET.truss, roughness: 0.4, metalness: 0.7, normalScale: bump(1), alphaTest: 0.5, side: THREE.DoubleSide }),
     window: new THREE.MeshStandardMaterial({ color: '#2B2410', emissive: '#FFD9A0', emissiveIntensity: 1 }),
+    rock: new THREE.MeshStandardMaterial({ ...SET.rock, color: '#ffffff', roughness: 0.95, metalness: 0.05, normalScale: bump(1.2), flatShading: true }),
   };
   const lampMats = [M.window];
   const blinkers = [];
@@ -524,7 +619,7 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
   belt.position.y = -16;
   belt.rotation.set(0.2, 0, -0.1);
   near.add(belt);
-  const rockMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.95, metalness: 0.05, flatShading: true });
+  const rockMat = M.rock;
   const rocks = [];
   const rockMeshes = [];
   const MAX_ROCKS = 270;
@@ -624,6 +719,15 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
       m.head.position.copy(m.p);
       m.head.material.opacity = fade;
     }
+  }
+
+  // ---- texturing: tilings that depend on a mesh's UV layout. Kept apart from the builders above
+  // so that geometry edits there do not collide with it; a mesh that no longer matches keeps M.white.
+  {
+    // a torus has one UV square over its whole length: 138 units round the wheel, 15 round the tube
+    const wheelHull = M.white.clone();
+    Object.assign(wheelHull, TX.retile(SET.hull, 40, 4));
+    wheel.traverse((o) => { if (o.isMesh && o.material === M.white && o.geometry.type === 'TorusGeometry') o.material = wheelHull; });
   }
 
   // ================================================================ per frame

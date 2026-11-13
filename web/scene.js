@@ -160,31 +160,44 @@ function drawLabel(ctx, w, h, title, sub, color, dim, display = false, tag = nul
 }
 
 // ------------------------------------------------------------ materials
-const TEX = {
-  wood: TX.woodTexture(), terrazzo: TX.terrazzoTexture(), grass: TX.grassTexture(), fabric: TX.fabricTexture(),
-  rock: TX.rockTexture(), rug: TX.rugTexture(), keys: TX.keyboardTexture(),
+// PBR sets from textures.js (albedo + normal + packed occlusion/roughness), built once and shared.
+const PBR = {
+  wood: TX.woodSet(), terrazzo: TX.terrazzoSet(), grass: TX.grassSet(), fabric: TX.fabricSet(),
+  rock: TX.rockSet(), rug: TX.rugSet(), keys: TX.keyboardSet(), bark: TX.barkSet(), leaf: TX.leafSet(),
 };
+// the albedo maps on their own, for materials that only want the colour
+const TEX = Object.fromEntries(Object.entries(PBR).map(([k, set]) => [k, set.map]));
+const bump = (v) => new THREE.Vector2(v, v);
+// Merged props have UVs nobody should trust, so their gloss is broken up in object space instead.
+// Ultra only: it is a few noise taps per pixel, and clearcoat / sheen are a second specular lobe.
+const micro = (mat, opt) => (TX.HI ? TX.microRough(mat, opt) : mat);
 const M = {
-  wood: new THREE.MeshStandardMaterial({ map: TEX.wood, roughness: 0.55, metalness: 0 }),
-  frame: new THREE.MeshStandardMaterial({ color: '#F6F6F8', roughness: 0.35, metalness: 0.35 }),
-  dark: new THREE.MeshStandardMaterial({ color: '#2B2F3A', roughness: 0.35, metalness: 0.4 }),
-  plastic: new THREE.MeshStandardMaterial({ color: '#FAFAFC', roughness: 0.35 }),
-  keys: new THREE.MeshStandardMaterial({ map: TEX.keys, roughness: 0.5 }),
-  fabric: new THREE.MeshStandardMaterial({ map: TEX.fabric, color: '#FFC4D8', roughness: 0.9 }),
-  chairFrame: new THREE.MeshStandardMaterial({ color: '#3A3F4D', roughness: 0.4, metalness: 0.6 }),
-  ceramic: new THREE.MeshStandardMaterial({ color: '#FFFFFF', roughness: 0.25 }),
-  paper: new THREE.MeshStandardMaterial({ color: '#FFFFFF', roughness: 0.8 }),
-  leaf: new THREE.MeshStandardMaterial({ color: '#86D28F', roughness: 0.85, flatShading: true }),
+  wood: new THREE.MeshStandardMaterial({ ...PBR.wood, roughness: 1, metalness: 0, normalScale: bump(0.7) }),
+  frame: micro(new THREE.MeshStandardMaterial({ color: '#ECECEF', roughness: 0.38, metalness: 0.35 }), { scale: 90, amount: 0.1 }),
+  dark: micro(new THREE.MeshPhysicalMaterial({ color: '#2B2F3A', roughness: 0.4, metalness: 0.4, clearcoat: TX.HI ? 0.5 : 0, clearcoatRoughness: 0.12 }), { scale: 70, amount: 0.1 }),
+  plastic: micro(new THREE.MeshStandardMaterial({ color: '#F0F0F3', roughness: 0.4 }), { scale: 140, amount: 0.12 }),
+  keys: new THREE.MeshStandardMaterial({ ...PBR.keys, roughness: 0.45, normalScale: bump(1) }),
+  fabric: new THREE.MeshPhysicalMaterial({ ...PBR.fabric, color: '#FFC4D8', roughness: 0.92, normalScale: bump(0.9), sheen: TX.HI ? 0.7 : 0, sheenRoughness: 0.55, sheenColor: '#FFE9F0' }),
+  chairFrame: micro(new THREE.MeshStandardMaterial({ color: '#3A3F4D', roughness: 0.42, metalness: 0.6 }), { scale: 80, amount: 0.12 }),
+  ceramic: new THREE.MeshPhysicalMaterial({ color: '#F4F2EF', roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.06 }),
+  paper: new THREE.MeshStandardMaterial({ color: '#F4F3F0', roughness: 0.85 }),
+  leaf: new THREE.MeshStandardMaterial({ ...PBR.leaf, color: '#86D28F', roughness: 0.8, flatShading: true, normalScale: bump(0.8) }),
   succulent: new THREE.MeshStandardMaterial({ color: '#7FC49A', roughness: 0.6 }),
-  trunk: new THREE.MeshStandardMaterial({ color: '#B8865E', roughness: 0.95 }),
+  trunk: new THREE.MeshStandardMaterial({ ...PBR.bark, color: '#FFFFFF', roughness: 0.92, normalScale: bump(1) }),
   lampGlow: new THREE.MeshStandardMaterial({ color: '#FFF6E6', emissive: '#FFD79A', emissiveIntensity: 0, roughness: 0.3 }),
   skin: new THREE.MeshStandardMaterial({ color: '#F3D3BF', roughness: 0.65 }),
   eye: new THREE.MeshStandardMaterial({ color: '#2B2340', roughness: 0.2 }),
   white: new THREE.MeshBasicMaterial({ color: '#FFFFFF' }),
   blush: new THREE.MeshBasicMaterial({ color: '#FF9DB8', transparent: true, opacity: 0.55, depthWrite: false }),
   shoe: new THREE.MeshStandardMaterial({ color: '#F4F4F6', roughness: 0.5 }),
-  server: new THREE.MeshStandardMaterial({ color: '#E7EAF2', roughness: 0.35, metalness: 0.3 }),
-  metalDark: new THREE.MeshStandardMaterial({ color: '#4A4F5E', roughness: 0.45, metalness: 0.6 }),
+  server: micro(new THREE.MeshStandardMaterial({ color: '#E7EAF2', roughness: 0.38, metalness: 0.3 }), { scale: 60, amount: 0.1 }),
+  metalDark: micro(new THREE.MeshStandardMaterial({ color: '#4A4F5E', roughness: 0.45, metalness: 0.6 }), { scale: 50, amount: 0.14 }),
+  // the island itself
+  floor: TX.groundDetail(new THREE.MeshStandardMaterial({ ...PBR.terrazzo, roughness: 1, metalness: 0, normalScale: bump(0.25) }), { scale: 0.09, tone: 0.06, gloss: 0.2 }),
+  grass: TX.groundDetail(new THREE.MeshStandardMaterial({ ...PBR.grass, roughness: 0.9, normalScale: bump(0.8) }), { scale: 0.13, tone: 0.1, rings: 0.74, ringTone: 0.05 }),
+  rock: new THREE.MeshStandardMaterial({ ...PBR.rock, roughness: 1, flatShading: true, normalScale: bump(1) }),
+  rockSide: new THREE.MeshStandardMaterial({ ...TX.retile(PBR.rock, 16, 0.25), roughness: 1, flatShading: true, normalScale: bump(1) }),
+  rug: new THREE.MeshStandardMaterial({ ...PBR.rug, roughness: 1, normalScale: bump(0.5) }),
 };
 
 // Transform a geometry into a mergeable, non-indexed piece.
@@ -971,12 +984,12 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   scene.add(minjuLight);
 
   // ---- floating island
-  const floorMat = new THREE.MeshStandardMaterial({ map: TEX.terrazzo, roughness: 0.6, metalness: 0 });
+  const floorMat = M.floor;
   const floor = new THREE.Mesh(new THREE.CircleGeometry(36, 128), floorMat);
   floor.rotation.x = -Math.PI / 2;
   floor.receiveShadow = true;
   scene.add(floor);
-  const grass = new THREE.Mesh(new THREE.RingGeometry(27.2, 36, 128, 4), new THREE.MeshStandardMaterial({ map: TEX.grass, roughness: 0.95 }));
+  const grass = new THREE.Mesh(new THREE.RingGeometry(27.2, 36, 128, 4), M.grass);
   grass.rotation.x = -Math.PI / 2;
   grass.position.y = 0.008;
   grass.receiveShadow = true;
@@ -986,8 +999,8 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   kerb.position.y = 0.04;
   kerb.receiveShadow = true;
   scene.add(kerb);
-  const rockMat = new THREE.MeshStandardMaterial({ map: TEX.rock, roughness: 0.95, flatShading: true });
-  const side = new THREE.Mesh(new THREE.CylinderGeometry(36, 34.6, 2.4, 128, 2, true), rockMat);
+  const rockMat = M.rock;
+  const side = new THREE.Mesh(new THREE.CylinderGeometry(36, 34.6, 2.4, 128, 2, true), M.rockSide);
   side.position.y = -1.2;
   scene.add(side);
   {
@@ -1007,7 +1020,7 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
     rock.position.y = -2.4 - 10;
     scene.add(rock);
   }
-  const rug = new THREE.Mesh(new THREE.CircleGeometry(5.8, 96), new THREE.MeshStandardMaterial({ map: TEX.rug, roughness: 1 }));
+  const rug = new THREE.Mesh(new THREE.CircleGeometry(5.8, 96), M.rug);
   rug.rotation.x = -Math.PI / 2;
   rug.position.y = 0.012;
   rug.receiveShadow = true;
