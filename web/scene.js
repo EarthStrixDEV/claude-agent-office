@@ -2339,6 +2339,41 @@ export function createOffice(container, { onSelect, hour = 10, uiTheme = 'light'
   if (new URLSearchParams(location.search).has('stats')) window.__officeView = (x, y, z, tx = 0, ty = 0, tz = 0) => { camAnim = null; userCam = false; controls.target.set(tx, ty, tz); camera.position.set(x, y, z); };
   if (new URLSearchParams(location.search).has('stats')) window.__officeAgents = () => [...agents.values()].map((a) => ({ id: a.id.slice(0, 6), status: a.status, goal: a.goal, mode: a.mode, run: a.run, left: a.path.length, pos: a.avatar.position.toArray().map((n) => +n.toFixed(1)), visible: a.avatar.visible }));
 
+  // Self-test for ?stats: geometry sanity plus the triangle and draw-call budget of the current tier.
+  // The budget is for the office pass alone (not shadows or post) and allows 45 calls per session:
+  // an avatar is 31, the rest is its screen, label, ring, link line and any sub-agent desks.
+  if (new URLSearchParams(location.search).has('stats')) window.__officeSelfTest = () => {
+    const rows = [];
+    const add = (check, pass, detail) => rows.push({ check, pass: pass ? 'PASS' : 'FAIL', detail: String(detail) });
+    const lit = (m) => m && (m.isMeshStandardMaterial || m.isMeshLambertMaterial || m.isMeshPhongMaterial);
+    const seen = new Set(), bad = { nan: [], normals: [], material: [] };
+    let meshes = 0;
+    scene.traverse((o) => {
+      if (!o.isMesh) return;
+      meshes++;
+      const label = o.name || o.parent?.name || o.geometry.type;
+      const mats = [].concat(o.material || []);
+      if (!mats.length || mats.some((m) => !m)) bad.material.push(label);
+      if (seen.has(o.geometry)) return;
+      seen.add(o.geometry);
+      const pos = o.geometry.attributes.position, arr = pos?.array ?? pos?.data?.array;
+      if (!arr || arr.some((v) => v !== v)) bad.nan.push(label);
+      if (mats.some(lit) && !o.geometry.attributes.normal) bad.normals.push(label);
+    });
+    add('meshes have a material', !bad.material.length, bad.material.length ? bad.material.slice(0, 5) : `${meshes} meshes`);
+    add('no NaN in positions', !bad.nan.length, bad.nan.length ? bad.nan.slice(0, 5) : `${seen.size} geometries`);
+    add('lit meshes have normals', !bad.normals.length, bad.normals.length ? bad.normals.slice(0, 5) : 'ok');
+    add('42 desks', desks.length === 42, desks.length);
+    const size = new THREE.Box3().setFromObject(garden).getSize(new THREE.Vector3());
+    add('garden fits the island (72 m)', size.x > 50 && size.x < 80 && size.z < 80 && size.y < 20, size.toArray().map((n) => n.toFixed(1)).join(' x '));
+    const office = pipeline?.counts?.office ?? renderer.info.render;
+    const maxTris = quality === 'ultra' ? 1.0e6 : 0.67e6, maxCalls = 340 + agents.size * 45;
+    add(`triangles <= ${maxTris / 1e3}k (${quality})`, office.triangles <= maxTris, office.triangles);
+    add(`draw calls <= ${maxCalls}`, office.calls <= maxCalls, office.calls);
+    console.table(rows);
+    return { pass: rows.every((r) => r.pass === 'PASS'), quality, rows };
+  };
+
   return {
     update, pulse, focus, overview, setTime, setQuality, setUiTheme, setExternal,
     get hour() { return env.hour; }, get quality() { return quality; }, get capacity() { return desks.length; },

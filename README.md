@@ -11,7 +11,7 @@ The office is a Minju City-style island floating in orbit: terrazzo floor, a gar
 
 - **Clock.** Pick Real time (follows this computer), Manual (presets plus a sky-gradient slider), or Time-lapse (a whole day every 2 minutes). Lighting blends between Minju City's six keyframes: night, before dawn, sunrise, day, sunset and dusk. Through the day the Sun slides along the Earth's rim. At night it sets behind the Earth: the Earth's face goes dark with city lights under an orange rim, and the street lamps, desk lamps and station windows light up.
 - **Panels.** *Follow time* switches the panels to dark at night. You can also pin them to Light or Dark.
-- **Quality.** *Ultra* gives a 4K shadow map, retina pixel ratio, bushes, flowers and desk props. *Standard* is lighter and is the default on phones.
+- **Quality.** *Ultra* gives a 4K shadow map, retina pixel ratio, ambient occlusion, a wider glow, lamp light on the desks, full-size textures, bushes, flowers and desk props. *Standard* is lighter and is the default on phones. Texture size follows the setting from the next page load.
 
 All settings are remembered in this browser.
 
@@ -127,9 +127,11 @@ Grok Bot has no status API, so the office can't read your Bots by itself. Two pi
 - `web/styles.css` holds the panel tokens: `:root[data-theme="light"]` and `:root[data-theme="dark"]`.
 - `web/scene.js` holds the office, plus the time-of-day keyframes (`K_NIGHT` … `K_DUSK`, taken from Minju City's preset values).
 - `web/space.js` holds everything around it. The sky, Earth and Sun sit in a separate background scene thousands of units away, so the desks keep full depth precision. The Earth's surface, clouds and sky are painted once on the GPU at start-up, so each frame only samples textures.
-- `web/textures.js` draws every texture procedurally: wood, terrazzo, grass, fabric, rock, rug, keyboards, solar panels, gold foil, the Sun and the live code on each screen. There are no image downloads.
+- `web/textures.js` draws every texture procedurally: wood, terrazzo, grass, fabric, rock, rug, bark, leaves, keyboards, hull plating, solar panels, gold foil, asteroid rock, the Sun and the live code on each screen. Each surface is a set of maps (colour, normal, and roughness with occlusion and metalness packed beside it), so wood has grain you can see in the light and foil crinkles. There are no image downloads.
+- `web/mesh.js` is the modelling kit: profiles turned on a lathe, tubes along curves, noise-displaced blobs for canopies and rocks, and UV helpers that keep textures at about one tile per metre.
+- `web/render.js` is the frame pipeline. The office is drawn into a floating-point (HDR) target with 4x MSAA, then glow, ambient occlusion (Ultra) and one final pass that tone-maps (ACES) and grades the picture. Labels, alert badges and progress rings are drawn after that, so they stay crisp. Browsers without float render targets fall back to drawing straight to the canvas; `?direct` in the URL forces that path.
 - Desks, chairs, props, trees, flowers, lamps and benches are drawn as `InstancedMesh`, so all 42 desks share a few draw calls. Per-desk meshes are only the live parts: screen, status light, label, and the avatar when someone sits there.
-- Add `?stats` to the URL and run `__officeStats()` in the console to see draw calls and triangles.
+- Add `?stats` to the URL and run `__officeStats()` in the console to see draw calls and triangles for the whole frame and per stage (space, shadow map, office, post). `__officeSelfTest()` checks the geometry (no broken positions, normals present) and the triangle and draw-call budget of the current quality.
 
 ## Config
 
