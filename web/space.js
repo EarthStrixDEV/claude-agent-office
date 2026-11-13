@@ -11,6 +11,7 @@
 // so each frame only samples them.
 import * as THREE from 'three';
 import * as TX from './textures.js';
+import { part, merge, RB, mapUV, lathe, rod, blob } from './mesh.js';
 
 const DEG = Math.PI / 180;
 // The Earth sits ahead of the default view and below it: its rim crosses the top of the screen,
@@ -360,66 +361,131 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
     parent.add(s);
     blinkers.push(s);
   };
-  const cyl = (r, len, mat, axis = 'y', seg = 24) => {
-    const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, seg), mat);
-    if (axis === 'z') m.rotation.x = Math.PI / 2;
-    if (axis === 'x') m.rotation.z = Math.PI / 2;
-    return m;
+
+  // Every craft below is modelled as lists of pieces per material and merged, so a whole station
+  // costs a handful of draw calls however much detail it carries.
+  const bins = () => ({ white: [], metal: [], dark: [], foil: [], solar: [], window: [] });
+  const build = (group, B) => {
+    for (const [key, list] of Object.entries(B)) if (list.length) group.add(new THREE.Mesh(merge(list), M[key]));
+    return group;
+  };
+  const QX = Math.PI / 2;
+  // A pressurised module along +Y: end cones down to the docking collar, raised bands round the hull.
+  const moduleGeo = (len, r, seg = 28) => {
+    const h = len / 2, c = Math.min(0.5 * r, h * 0.3), band = (y) => [[r, y - 0.1], [r + 0.04, y - 0.07], [r + 0.04, y + 0.07], [r, y + 0.1]];
+    return lathe([[0, -h], [0.56 * r, -h, 1], [0.62 * r, -h + 0.03], [r, -h + c], ...band(-h * 0.36), ...band(h * 0.36), [r, h - c], [0.62 * r, h - 0.03], [0.56 * r, h, 1], [0, h]], seg);
+  };
+  const collarGeo = (r) => lathe([[r, -0.12, 1], [r + 0.07, -0.09], [r + 0.07, 0.09], [r, 0.12, 1]], 20);
+  // A dish along +Y (opening upwards) with its feed on three struts.
+  const dishGeo = (r, B, place) => {
+    const d = 0.3 * r;
+    B.white.push(place(lathe([[0, -0.04 * r], [0.33 * r, 0], [0.66 * r, 0.1 * r], [r, d], [1.02 * r, d + 0.02 * r], [r, d + 0.03 * r], [0.66 * r, 0.14 * r], [0.33 * r, 0.04 * r], [0, 0]], 24)));
+    B.metal.push(place(lathe([[0, 0.62 * r], [0.07 * r, 0.62 * r, 1], [0.1 * r, 0.76 * r], [0.04 * r, 0.8 * r], [0, 0.8 * r]], 10)));
+    for (let i = 0; i < 3; i++) { const a = (i / 3) * Math.PI * 2; B.metal.push(place(rod([Math.cos(a) * r * 0.92, d * 0.9, Math.sin(a) * r * 0.92], [Math.cos(a) * r * 0.06, 0.66 * r, Math.sin(a) * r * 0.06], 0.02 * r, 0.02 * r, 4))); }
+  };
+  // A solar blanket lying in XZ, long side along Z, in a frame with battens. Cells keep their
+  // proportions: four across the short side, rows along the long one.
+  const blanket = (B, w, len, x, y, z, turn = 0, t = 0.03) => {
+    const place = (g) => g.rotateY(turn).translate(x, y, z);
+    B.solar.push(place(mapUV(part(new THREE.BoxGeometry(w, t, len)), (px, py, pz) => [px / w + 0.5, (pz / w) * 0.25])));
+    const rail = Math.max(0.035, w * 0.035);
+    for (const s of [-1, 1]) {
+      B.metal.push(place(part(new THREE.BoxGeometry(rail, rail * 1.4, len + rail), s * w / 2, 0, 0)));
+      B.metal.push(place(part(new THREE.BoxGeometry(w, rail * 1.4, rail), 0, 0, s * len / 2)));
+    }
+    const n = Math.max(1, Math.round(len / (w * 1.6)));
+    for (let i = 1; i < n; i++) B.metal.push(place(part(new THREE.BoxGeometry(w, rail, rail * 0.8), 0, 0, -len / 2 + (len * i) / n)));
   };
 
   // ---- space station: a long truss, eight solar wings, radiators and a string of modules
   const station = new THREE.Group();
   {
-    const g = station;
+    const g = station, B = bins();
+    // the alpha-tested lattice still reads best from 100 m away; real longerons and bulkhead frames give it depth
     const truss = new THREE.Mesh(new THREE.BoxGeometry(36, 1.1, 1.1), M.truss);
     g.add(truss);
-    const wing = new THREE.BoxGeometry(2.5, 0.05, 10.5);
+    for (const y of [-0.55, 0.55]) for (const z of [-0.55, 0.55]) B.metal.push(part(rod([-18, y, z], [18, y, z], 0.05, 0.05, 6)));
+    for (let i = 0; i <= 8; i++) {
+      const x = -18 + i * 4.5, c = [[-0.55, -0.55], [0.55, -0.55], [0.55, 0.55], [-0.55, 0.55]];
+      c.forEach(([y, z], k) => { const [y2, z2] = c[(k + 1) % 4]; B.metal.push(part(rod([x, y, z], [x, y2, z2], 0.04, 0.04, 4))); });
+    }
+    // solar wings: a mast through a gimbal canister, two framed blankets either side of it
     for (const x of [-17.4, -14.1, 14.1, 17.4]) {
-      const mast = cyl(0.09, 23, M.metal, 'z', 6);
-      mast.position.x = x;
-      g.add(mast);
+      B.metal.push(part(rod([x, 0, -11.6], [x, 0, 11.6], 0.09, 0.09, 6, true)));
+      B.foil.push(part(RB(1.2, 1.3, 1.6, 0.12, 1), x, 0, 0));
       for (const s of [-1, 1]) {
-        const w = new THREE.Mesh(wing, M.solar);
-        w.position.set(x, 0, s * 6.2);
-        g.add(w);
+        B.metal.push(part(new THREE.CylinderGeometry(0.3, 0.3, 0.36, 14), x, 0, s * 0.95, QX));
+        for (const o of [-0.66, 0.66]) blanket(B, 1.12, 10.3, x + o, 0, s * 6.35);
       }
-      const box = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.3, 1.6), M.foil);
-      box.position.x = x;
-      g.add(box);
     }
-    for (const x of [-11.2, 11.2]) { const j = cyl(0.75, 1.4, M.metal, 'x'); j.position.x = x; g.add(j); }
+    // rotary joints between the inboard and outboard truss
+    for (const x of [-11.2, 11.2]) {
+      B.metal.push(part(lathe([[0.56, -0.7], [0.75, -0.6], [0.78, -0.22], [0.87, -0.16], [0.87, 0.16], [0.78, 0.22], [0.75, 0.6], [0.56, 0.7]], 24), x, 0, 0, 0, 0, QX));
+    }
+    // radiators: ribbed panels hanging from a boom
     for (const x of [-6.4, 6.4]) {
+      B.metal.push(part(rod([x, -0.55, -2.3], [x, -0.75, 2.3], 0.07, 0.07, 6, true)));
       for (let i = 0; i < 3; i++) {
-        const rad = new THREE.Mesh(new THREE.BoxGeometry(0.06, 5.2, 1.7), M.white);
-        rad.position.set(x + (i - 1) * 0.5, -3.3, (i - 1) * 1.9);
-        g.add(rad);
+        const px = x + (i - 1) * 0.5, pz = (i - 1) * 1.9;
+        B.white.push(part(new THREE.BoxGeometry(0.05, 5.2, 1.7), px, -3.3, pz));
+        for (let k = 0; k < 6; k++) B.white.push(part(new THREE.BoxGeometry(0.11, 0.06, 1.74), px, -5.7 + k * 0.96, pz));
+        B.metal.push(part(new THREE.BoxGeometry(0.14, 0.1, 1.8), px, -0.68, pz));
       }
     }
-    const mods = [[-9.6, 4.6, 0.95, M.white], [-3.7, 4.8, 1, M.white], [2.4, 5, 1, M.white], [7.2, 4, 0.9, M.foil], [10.4, 2.2, 0.62, M.dark]];
-    for (const [z, len, r, mat] of mods) {
-      const m = cyl(r, len, mat, 'z');
-      m.position.set(0, -1.6, z);
-      g.add(m);
-      for (const e of [-1, 1]) { const ring = cyl(r + 0.05, 0.18, M.metal, 'z'); ring.position.set(0, -1.6, z + e * (len / 2 - 0.15)); g.add(ring); }
+    // the pressurised stack along Z, hung under the truss
+    const Y = -1.6;
+    const mods = [[-9.6, 4.6, 0.95, 'white'], [-3.7, 4.8, 1, 'white'], [2.4, 5, 1, 'white'], [7.2, 4, 0.9, 'foil'], [10.4, 2.2, 0.62, 'dark']];
+    for (const [z, len, r, key] of mods) {
+      B[key].push(part(moduleGeo(len, r), 0, Y, z, QX));
+      for (const e of [-1, 1]) B.metal.push(part(collarGeo(0.56 * r), 0, Y, z + e * (len / 2 + 0.02), QX));
+      if (key !== 'white') continue;
+      for (const s of [-1, 1]) {
+        const a = s * 0.62; // handrails along the upper flanks, portholes below them
+        B.metal.push(part(rod([Math.sin(a) * (r + 0.09), Y + Math.cos(a) * (r + 0.09), z - len / 2 + 0.9], [Math.sin(a) * (r + 0.09), Y + Math.cos(a) * (r + 0.09), z + len / 2 - 0.9], 0.025, 0.025, 4)));
+        for (let k = -1; k <= 1; k++) {
+          const b = s * 1.25, wz = z + k * len * 0.24;
+          B.window.push(part(new THREE.CylinderGeometry(0.11, 0.11, 0.04, 10), Math.sin(b) * (r + 0.02), Y + Math.cos(b) * (r + 0.02), wz, 0, 0, -b));
+          B.metal.push(part(rod([Math.sin(a) * r, Y + Math.cos(a) * r, wz + 0.5], [Math.sin(a) * (r + 0.09), Y + Math.cos(a) * (r + 0.09), wz + 0.5], 0.02, 0.02, 4)));
+        }
+      }
     }
+    // nodes: short drums with berthing ports up to the truss, down and to both sides
+    const nodeGeo = lathe([[0.6, -1.05], [0.95, -0.85], [1.15, -0.45], [1.15, 0.45], [0.95, 0.85], [0.6, 1.05]], 28);
     for (const z of [-6.6, -0.6]) {
-      const node = new THREE.Mesh(new THREE.SphereGeometry(1.15, 24, 16), M.white);
-      node.position.set(0, -1.6, z);
-      g.add(node);
+      B.white.push(part(nodeGeo, 0, Y, z, QX));
+      B.metal.push(part(collarGeo(0.56), 0, Y + 1.12, z), part(collarGeo(0.56), 0, Y - 1.12, z));
+      B.metal.push(part(collarGeo(0.56), 1.12, Y, z, 0, 0, QX), part(collarGeo(0.56), -1.12, Y, z, 0, 0, QX));
     }
+    for (const s of [-1, 1]) B[s < 0 ? 'white' : 'foil'].push(part(moduleGeo(3.6, 0.9), s * 2.95, Y, -0.6, 0, 0, QX));
+    // cupola under the forward node: six glowing panes in a frame
+    {
+      const pane = lathe([[0, -0.3], [0.36, -0.3], [0.6, 0.05]], 6).toNonIndexed();
+      pane.computeVertexNormals();
+      B.window.push(part(pane, 0, Y - 1.5, -6.6));
+      B.metal.push(part(new THREE.CylinderGeometry(0.64, 0.64, 0.2, 12), 0, Y - 1.36, -6.6));
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2, a2 = ((i + 1) / 6) * Math.PI * 2, p = (rad, ang, y) => [Math.sin(ang) * rad, Y - 1.5 + y, -6.6 + Math.cos(ang) * rad];
+        B.metal.push(part(rod(p(0.37, a, -0.3), p(0.61, a, 0.05), 0.03, 0.03, 4)), part(rod(p(0.37, a, -0.3), p(0.37, a2, -0.3), 0.03, 0.03, 4)));
+      }
+    }
+    // aft: two small wings on yokes, and a visiting capsule on the last port
     for (const s of [-1, 1]) {
-      const m = cyl(0.9, 3.6, s < 0 ? M.white : M.foil, 'x');
-      m.position.set(s * 2.9, -1.6, -0.6);
-      g.add(m);
+      blanket(B, 0.7, 2.5, s * 1.95, Y, 10.6, QX);
+      B.metal.push(part(rod([s * 0.6, Y, 10.6], [s * 0.72, Y, 10.6], 0.04, 0.04, 6)));
     }
-    const cupola = cyl(0.55, 0.5, M.metal, 'y', 8);
-    cupola.position.set(0, -2.9, -6.6);
-    g.add(cupola);
-    for (const s of [-1, 1]) {
-      const w = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.03, 0.7), M.solar);
-      w.position.set(s * 1.9, -1.6, 10.6);
-      g.add(w);
+    B.white.push(part(lathe([[0.3, 0], [0.3, 0.15], [0.68, 1.05], [0.7, 1.2, 1], [0.6, 1.3], [0, 1.34]], 20), 0, Y, 11.5, QX));
+    B.dark.push(part(lathe([[0.6, 1.3], [0.62, 1.34], [0.62, 1.95, 1], [0, 1.95]], 20), 0, Y, 11.5, QX));
+    for (const s of [-1, 1]) blanket(B, 0.45, 1.4, s * 1.35, Y, 13.15, QX);
+    // on top of the truss: a dish on a boom, whip aerials and the robot arm
+    B.metal.push(part(rod([3, 0.5, 0], [3, 2.3, 0.2], 0.07, 0.05, 6)));
+    dishGeo(0.95, B, (geo) => part(geo, 3, 2.3, 0.2, 0.5, 0, -0.35));
+    for (const [x, z] of [[-2.2, 0.4], [8.4, -0.4], [-9, 0.3]]) B.metal.push(part(rod([x, 0.5, z], [x + 0.2, 2.6, z * 2], 0.025, 0.012, 4)));
+    {
+      const pts = [[-4, 0.6, 0.3], [-5.4, 2.5, 1.3], [-7.3, 1.5, 2.4], [-7.5, 0.9, 2.6]];
+      for (let i = 0; i < 3; i++) B.white.push(part(rod(pts[i], pts[i + 1], 0.1, 0.1, 8)));
+      for (const p of pts) B.metal.push(part(new THREE.SphereGeometry(0.15, 10, 8), ...p));
     }
+    build(g, B);
     blink(g, -18.6, 0, 0, '#FF4D5E', 2.2, 1, 0);
     blink(g, 18.6, 0, 0, '#4DFF9A', 2.2, 1, 0.5);
     blink(g, 0, 0.8, 0, '#FFFFFF', 2.6, 0.7, 0.2);
@@ -431,40 +497,43 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
   const ring = new THREE.Group();
   const wheel = new THREE.Group();
   {
-    wheel.add(new THREE.Mesh(new THREE.TorusGeometry(22, 2.4, 20, 128), M.white));
-    for (const r of [19.75, 24.25]) {
-      const strip = new THREE.Mesh(new THREE.TorusGeometry(r, 0.32, 6, 128), M.window);
-      wheel.add(strip);
-    }
-    for (let i = 0; i < 4; i++) {
-      const sp = cyl(0.55, 20, M.metal, 'y', 10);
-      sp.rotation.z = (i / 4) * Math.PI * 2;
-      sp.position.set(-Math.sin(sp.rotation.z) * 10.5, Math.cos(sp.rotation.z) * 10.5, 0);
-      wheel.add(sp);
+    const W = bins(), S = bins();
+    // the wheel: habitat tube with structural ribs, capsule pods, window strips, spokes and stays
+    W.white.push(part(new THREE.TorusGeometry(22, 2.4, 20, 120)));
+    const rib = new THREE.TorusGeometry(2.47, 0.1, 4, 14).rotateX(QX);
+    const pod = lathe([[0, -3.3], [0.7, -3.24], [1.16, -2.9], [1.26, -2.5], [1.26, -0.2], [1.32, -0.14], [1.32, 0.14], [1.26, 0.2], [1.26, 2.5], [1.16, 2.9], [0.7, 3.24], [0, 3.3]], 14);
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2;
+      W.white.push(part(rib.clone().rotateZ(a).translate(Math.cos(a) * 22, Math.sin(a) * 22, 0)));
     }
     for (let i = 0; i < 12; i++) {
-      const pod = new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.2, 6.4), M.white);
       const a = (i / 12) * Math.PI * 2 + 0.26;
-      pod.position.set(Math.cos(a) * 22, Math.sin(a) * 22, 0);
-      pod.rotation.z = a;
-      wheel.add(pod);
+      W.white.push(part(pod, Math.cos(a) * 22, Math.sin(a) * 22, 0, QX));
+      for (const z of [-3.32, 3.32]) W.window.push(part(new THREE.CylinderGeometry(0.42, 0.42, 0.06, 12), Math.cos(a) * 22, Math.sin(a) * 22, z, QX));
     }
-    ring.add(wheel);
-    const hub = cyl(3, 7, M.white, 'z');
-    ring.add(hub);
-    const mast = cyl(0.4, 30, M.metal, 'z', 8);
-    ring.add(mast);
+    for (const r of [19.75, 24.25]) W.window.push(part(new THREE.TorusGeometry(r, 0.32, 5, 96)));
+    const spoke = lathe([[0.95, -10.2], [0.55, -9.2], [0.55, -0.7], [0.78, -0.5], [0.78, 0.5], [0.55, 0.7], [0.55, 9.2], [0.95, 10.2]], 12);
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      W.metal.push(part(spoke, -Math.sin(a) * 10.5, Math.cos(a) * 10.5, 0, 0, 0, a));
+      const b = a + Math.PI / 4;
+      W.metal.push(part(rod([Math.cos(b) * 2.6, Math.sin(b) * 2.6, 0], [Math.cos(b) * 19.7, Math.sin(b) * 19.7, 0], 0.14, 0.14, 5)));
+    }
+    ring.add(build(wheel, W));
+    // the still axis: hub with end cones and a lit window band, mast, four framed wings, the dish
+    S.white.push(part(lathe([[1.2, -4.6], [1.6, -4.4], [2.2, -3.6], [3, -3.2], [3, -1.0], [3.25, -0.9], [3.25, 0.9], [3, 1.0], [3, 3.2], [2.2, 3.6], [1.6, 4.4], [1.2, 4.6]], 32), 0, 0, 0, QX));
+    for (const z of [-2.1, 2.1]) S.window.push(part(lathe([[3.03, -0.22], [3.03, 0.22]], 32), 0, 0, z, QX));
+    S.metal.push(part(rod([0, 0, -15], [0, 0, 15], 0.4, 0.4, 10, true)));
     for (const z of [-11, 11]) {
+      S.metal.push(part(collarGeo(0.42), 0, 0, z, QX));
       for (const s of [-1, 1]) {
-        const w = new THREE.Mesh(new THREE.BoxGeometry(14, 0.06, 4.2), M.solar);
-        w.position.set(s * 8.5, 0, z);
-        ring.add(w);
+        S.metal.push(part(rod([s * 0.4, 0, z], [s * 1.5, 0, z], 0.16, 0.16, 6)));
+        for (const o of [-1.08, 1.08]) blanket(S, 2.0, 14, s * 8.5, 0, z + o, QX, 0.06);
       }
     }
-    const dish = new THREE.Mesh(new THREE.SphereGeometry(3, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.32), M.white);
-    dish.position.z = 16.5;
-    dish.rotation.x = Math.PI / 2;
-    ring.add(dish);
+    dishGeo(3, S, (geo) => part(geo, 0, 0, 15.2, QX));
+    S.metal.push(part(lathe([[0.4, 0], [0.9, 0.3], [0.9, 0.9, 1], [0.5, 1.0]], 16), 0, 0, -15, -QX));
+    build(ring, S);
     blink(ring, 0, 0, 18, '#FF4D5E', 5, 0.6, 0.1);
     ring.position.set(250, -150, -470);
     ring.rotation.set(0.85, -0.5, 0.25);
@@ -475,38 +544,50 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
   const sats = [];
   {
     const r = TX.rng(404);
-    const make = (kind) => {
-      const g = new THREE.Group();
-      if (kind === 0) {           // comms satellite: gold box, two long wings, a dish
-        g.add(new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 1.8), M.foil));
+    // each kind is modelled once; the eight satellites share those geometries
+    const kinds = [bins(), bins(), bins()].map((B, kind) => {
+      if (kind === 0) {           // comms satellite: gold bus, two long framed wings on yokes, a dish, whips, thrusters
+        B.foil.push(part(RB(1.4, 1.4, 1.8, 0.1, 1)));
         for (const s of [-1, 1]) {
-          const w = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.04, 1.3), M.solar);
-          w.position.x = s * 3.2;
-          g.add(w);
-          const arm = cyl(0.05, 0.8, M.metal, 'x', 6); arm.position.x = s * 0.9; g.add(arm);
+          blanket(B, 1.3, 4.6, s * 3.2, 0, 0, QX, 0.04);
+          B.metal.push(part(rod([s * 0.7, 0, 0], [s * 0.92, 0, 0], 0.06, 0.06, 6)));
+          B.metal.push(part(rod([s * 0.9, 0, 0], [s * 0.9, 0, 0.6], 0.03, 0.03, 4)), part(rod([s * 0.9, 0, 0], [s * 0.9, 0, -0.6], 0.03, 0.03, 4)));
+          B.metal.push(part(rod([s * 0.45, 0.7, -0.5], [s * 0.95, 1.9, -0.9], 0.02, 0.01, 4)));
+          for (const y of [-0.4, 0.4]) B.dark.push(part(lathe([[0.05, 0], [0.14, -0.22], [0.16, -0.22], [0.07, 0]], 8), s * 0.4, y, -0.9, QX));
         }
-        const dish = new THREE.Mesh(new THREE.SphereGeometry(0.9, 20, 10, 0, Math.PI * 2, 0, Math.PI * 0.35), M.white);
-        dish.position.set(0, 0, 1.6); dish.rotation.x = -Math.PI / 2;
-        g.add(dish);
-      } else if (kind === 1) {    // observatory: a white tube with one big panel
-        const tube = cyl(0.7, 3.4, M.white, 'z');
-        g.add(tube);
-        const cap = cyl(0.72, 0.3, M.dark, 'z'); cap.position.z = 1.8; g.add(cap);
-        const w = new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.6, 3.6), M.solar);
-        w.position.x = 1.0;
-        g.add(w);
-      } else {                    // cubesat with fold-out panels
-        g.add(new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.9), M.metal));
+        dishGeo(0.9, B, (geo) => part(geo, 0, 0, 0.94, QX));
+        B.metal.push(part(RB(1.0, 0.5, 0.06, 0.02, 1), 0, 0.72, 0.2, QX));
+      } else if (kind === 1) {    // observatory: a white tube with a dark baffle, an open lid, two wings and an aerial
+        B.white.push(part(lathe([[0, -1.7], [0.5, -1.7, 1], [0.7, -1.5], [0.7, 1.0], [0.745, 1.03], [0.745, 1.7, 1], [0.69, 1.7]], 24), 0, 0, 0, QX));
+        B.dark.push(part(lathe([[0.69, 1.7], [0.69, 0.5, 1], [0, 0.5]], 24), 0, 0, 0, QX));
+        B.dark.push(part(lathe([[0.72, -0.5], [0.74, -0.46], [0.74, -0.14], [0.72, -0.1]], 24), 0, 0, 0, QX));
+        B.white.push(part(new THREE.CylinderGeometry(0.74, 0.74, 0.05, 24), 0, 0.99, 2.4, -0.35));          // aperture door, hinged open
+        B.metal.push(part(rod([-0.2, 0.75, 1.72], [0.2, 0.75, 1.72], 0.04, 0.04, 6, true)));
         for (const s of [-1, 1]) {
-          const w = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.03, 0.85), M.solar);
-          w.position.x = s * 0.78;
-          g.add(w);
+          blanket(B, 1.2, 2.6, s * 1.75, 0, -0.3, 0, 0.04);
+          B.metal.push(part(rod([s * 0.7, 0, -0.3], [s * 1.15, 0, -0.3], 0.05, 0.05, 6)));
         }
+        B.metal.push(part(rod([0, -0.7, -1.2], [0, -1.5, -1.5], 0.035, 0.035, 5)));
+        dishGeo(0.34, B, (geo) => part(geo, 0, -1.5, -1.5, Math.PI - 0.5));
+        for (const z of [-0.95, 0.6]) B.metal.push(part(new THREE.TorusGeometry(0.72, 0.03, 4, 24), 0, 0, z));
+      } else {                    // cubesat: rails on the corners, body cells, fold-out panels on hinges, a lens, tape aerials
+        B.metal.push(part(RB(0.6, 0.6, 0.9, 0.03, 1)));
+        for (const x of [-1, 1]) {
+          for (const y of [-1, 1]) {
+            B.dark.push(part(new THREE.BoxGeometry(0.06, 0.06, 0.96), x * 0.29, y * 0.29, 0));
+            B.metal.push(part(rod([x * 0.27, y * 0.27, 0.46], [x * 0.72, y * 0.72, 0.98], 0.012, 0.012, 4)));
+          }
+          blanket(B, 0.85, 0.9, x * 0.79, 0, 0, QX, 0.03);
+          B.metal.push(part(new THREE.CylinderGeometry(0.03, 0.03, 0.85, 8), x * 0.32, 0, 0, QX));
+        }
+        for (const y of [-1, 1]) B.solar.push(mapUV(part(new THREE.BoxGeometry(0.46, 0.012, 0.8), 0, y * 0.305, 0), (px, py, pz) => [px / 0.46 + 0.5, pz / 1.84]));
+        B.dark.push(part(lathe([[0.17, 0], [0.19, 0.02], [0.19, 0.09], [0.15, 0.11], [0.13, 0.05], [0, 0.04]], 14), 0, 0, 0.45, QX));
       }
-      return g;
-    };
+      return Object.entries(B).filter(([, list]) => list.length).map(([key, list]) => [merge(list), M[key]]);
+    });
     for (let i = 0; i < 8; i++) {
-      const g = make(i % 3);
+      const g = new THREE.Group();
+      for (const [geo, mat] of kinds[i % 3]) g.add(new THREE.Mesh(geo, mat));
       const scale = i % 3 === 2 ? 1.6 : 1;
       g.scale.setScalar(scale);
       blink(g, 0, 0.9, 0, i % 2 ? '#FF5C7A' : '#7CE0FF', 1.4, 0.8 + r() * 0.6, r());
@@ -525,50 +606,58 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
   belt.rotation.set(0.2, 0, -0.1);
   near.add(belt);
   const rockMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.95, metalness: 0.05, flatShading: true });
+  rockMat.flatShading = false; // the rocks carry their own smooth normals now
   const rocks = [];
   const rockMeshes = [];
   const MAX_ROCKS = 270;
   {
     const r = TX.rng(9);
-    for (let v = 0; v < 3; v++) {
-      const geo = new THREE.IcosahedronGeometry(1, 2);
-      const pos = geo.attributes.position;
-      const waves = Array.from({ length: 4 }, () => [new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), 2 + r() * 4, r() * 6, 0.05 + r() * 0.1]);
-      const craters = Array.from({ length: 5 }, () => [new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), 0.88 + r() * 0.08, 0.08 + r() * 0.1]);
-      for (let i = 0; i < pos.count; i++) {
-        const d = _v.fromBufferAttribute(pos, i).normalize();
-        let f = 1;
-        for (const [dir, k, ph, amp] of waves) f += amp * Math.sin(d.dot(dir) * k + ph);
-        for (const [dir, edge, depth] of craters) { const c = d.dot(dir); if (c > edge) f -= depth * Math.sin(((c - edge) / (1 - edge)) * Math.PI * 0.5); }
-        pos.setXYZ(i, d.x * f, d.y * f, d.z * f);
-      }
-      geo.computeVertexNormals();
-      const mesh = new THREE.InstancedMesh(geo, rockMat, MAX_ROCKS);
-      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      mesh.frustumCulled = false;
-      belt.add(mesh);
-      rockMeshes.push(mesh);
-    }
-    const counts = [0, 0, 0];
+    // Each shape: several octaves of noise, a few broad lobes, and craters with a raised rim.
+    // It is built twice: dense for the big rocks that pass close, light for the gravel.
+    const shapes = [0, 1, 2].map((v) => {
+      const craters = Array.from({ length: 7 }, () => [new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), 0.84 + r() * 0.12, 0.1 + r() * 0.14]);
+      const lobes = Array.from({ length: 3 }, () => [new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), 1.5 + r() * 2, r() * 6, 0.06 + r() * 0.08]);
+      const shape = (d, f) => {
+        for (const [dir, k, ph, amp] of lobes) f += amp * Math.sin(d.dot(dir) * k + ph);
+        for (const [dir, edge, depth] of craters) {
+          const t = (d.dot(dir) - edge) / (1 - edge);
+          if (t > 0) f -= depth * Math.sin(Math.min(1, t * 1.6) * Math.PI * 0.5);
+          if (t > -0.5 && t < 0.25) f += depth * 0.35 * Math.exp(-((t / 0.16) ** 2));
+        }
+        return f;
+      };
+      return [5, 2].map((detail) => blob(detail, 31 + v * 7, { amp: 0.3, freq: 1.4, oct: detail > 2 ? 4 : 2, puff: detail > 2 ? 0.1 : 0, puffFreq: 3.4, shape }));
+    });
     const colors = ['#8C8379', '#6F6A66', '#9A8A78', '#7A7068', '#857B8A'];
+    const tint = [];
     for (let i = 0; i < MAX_ROCKS; i++) {
-      const v = i % 3, idx = counts[v]++;
+      const v = i % 3;
       const radius = 62 + (r() ** 0.8) * 75;
       const giant = i < 4;
       const size = giant ? 2.6 + r() * 2 : 0.25 + (r() ** 4) * 2.2;
       rocks.push({
-        mesh: rockMeshes[v], v, idx, radius, a: r() * Math.PI * 2, y: (r() + r() + r() - 1.5) * 6,
+        m: v * 2 + (size > 1.5 ? 0 : 1), idx: 0, radius, a: r() * Math.PI * 2, y: (r() + r() + r() - 1.5) * 6,
         speed: 0.022 * (70 / radius) ** 1.5, size, stretch: new THREE.Vector3(1, 0.6 + r() * 0.4, 0.7 + r() * 0.6),
         rot: new THREE.Euler(r() * 6, r() * 6, r() * 6), spin: new THREE.Vector3((r() - 0.5) * 0.8, (r() - 0.5) * 0.8, (r() - 0.5) * 0.8),
         order: i,
       });
-      rockMeshes[v].setColorAt(idx, new THREE.Color(colors[Math.floor(r() * colors.length)]).multiplyScalar(0.8 + r() * 0.4));
+      tint.push(new THREE.Color(colors[Math.floor(r() * colors.length)]).multiplyScalar(0.8 + r() * 0.4));
     }
-    for (const m of rockMeshes) m.instanceColor.needsUpdate = true;
+    const counts = [0, 0, 0, 0, 0, 0];
+    for (const k of rocks) k.idx = counts[k.m]++;
+    shapes.flat().forEach((geo, m) => {
+      const mesh = new THREE.InstancedMesh(geo, rockMat, Math.max(1, counts[m]));
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      mesh.frustumCulled = false;
+      belt.add(mesh);
+      rockMeshes.push(mesh);
+    });
+    rocks.forEach((k, i) => rockMeshes[k.m].setColorAt(k.idx, tint[i]));
+    for (const m of rockMeshes) if (m.instanceColor) m.instanceColor.needsUpdate = true;
   }
   let rockLimit = MAX_ROCKS;
   function placeRocks(dt, motion) {
-    const counts = [0, 0, 0];
+    const counts = [0, 0, 0, 0, 0, 0];
     for (const k of rocks) {
       if (k.order >= rockLimit) continue;
       if (motion) {
@@ -578,8 +667,8 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
       _v.set(Math.cos(k.a) * k.radius, k.y, Math.sin(k.a) * k.radius);
       _q.setFromEuler(k.rot);
       _m.compose(_v, _q, _s.copy(k.stretch).multiplyScalar(k.size));
-      k.mesh.setMatrixAt(k.idx, _m);
-      counts[k.v] = Math.max(counts[k.v], k.idx + 1);
+      rockMeshes[k.m].setMatrixAt(k.idx, _m);
+      counts[k.m] = Math.max(counts[k.m], k.idx + 1);
     }
     rockMeshes.forEach((m, i) => { m.count = counts[i]; m.instanceMatrix.needsUpdate = true; });
   }
