@@ -764,7 +764,9 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
     glare.material.opacity = 0.35 * clear;
   }
 
-  function render(camera) {
+  // Draws into whatever target is bound. prepare(scene) lets the frame pipeline (render.js)
+  // look at the background scene's materials before they are first compiled.
+  function render(camera, prepare = null) {
     bgCam.position.copy(camera.position);
     bgCam.quaternion.copy(camera.quaternion);
     if (bgCam.fov !== camera.fov || bgCam.aspect !== camera.aspect) {
@@ -773,6 +775,7 @@ export function createSpace({ renderer, scene, quality = 'ultra' }) {
     earthMat.uniforms.uCam.value.copy(bgCam.position);
     atmoMat.uniforms.uCam.value.copy(bgCam.position);
     starMat.uniforms.uPx.value = renderer.getPixelRatio();
+    if (prepare) prepare(bg);
     renderer.render(bg, bgCam);
   }
 
