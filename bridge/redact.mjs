@@ -15,7 +15,9 @@ export const SECRET_PATTERNS = [
 export function redact(text) {
   let out = String(text ?? '');
   for (const re of SECRET_PATTERNS) {
-    out = out.replace(re, (m, a, b) => (b !== undefined ? a + '••••' : '••••'));
+    // Two-group patterns keep the label (group 1) and hide the value (group 2). For one-group
+    // patterns the 3rd replacer argument is the match offset (a number), so test for a string.
+    out = out.replace(re, (m, a, b) => (typeof b === 'string' ? a + '••••' : '••••'));
   }
   return out;
 }
