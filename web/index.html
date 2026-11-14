@@ -47,15 +47,27 @@
     </header>
 
     <aside class="panel side left" id="left">
-      <div class="panel-head">
-        <h2>Current sessions</h2>
-        <span class="muted small" id="session-count"></span>
+      <div class="tabs left-tabs" role="tablist" aria-label="Sessions" id="left-tabs">
+        <button role="tab" class="tab" id="tab-office" data-left="office" aria-controls="pane-office" aria-selected="true">Office</button>
+        <button role="tab" class="tab" id="tab-history" data-left="history" aria-controls="pane-history" aria-selected="false" tabindex="-1">History</button>
       </div>
-      <div class="scroll" id="session-list"></div>
+      <div class="left-pane" id="pane-office" role="tabpanel" aria-labelledby="tab-office">
+        <div class="panel-head">
+          <h2>Current sessions</h2>
+          <span class="muted small"><span id="session-count"></span><span id="desk-overflow"></span></span>
+        </div>
+        <div class="scroll" id="session-list"></div>
+      </div>
+      <div class="left-pane" id="pane-history" role="tabpanel" aria-labelledby="tab-history" hidden></div>
     </aside>
 
     <aside class="panel side right" id="right">
-      <div id="detail"></div>
+      <div id="detail">
+        <div id="detail-head"></div>
+        <div class="tabs detail-tabs" role="tablist" id="detail-tabs" hidden></div>
+        <div class="scroll" id="detail-scroll"><div class="detail-body" id="detail-body"></div></div>
+        <section class="timeline" id="timeline" aria-label="Timeline" hidden></section>
+      </div>
     </aside>
 
     <section class="panel dock" id="dock">

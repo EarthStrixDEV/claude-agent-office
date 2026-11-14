@@ -1,5 +1,8 @@
 import { createOffice, STATUS_LABEL, progressOf, periodOf, isNightHour, shortModel, MODE_TAG } from './scene.js';
 import { initWorkspace } from './workspace.js';
+import { initHistory } from './history.js';
+import { initTimeline } from './timeline.js';
+import { h, dayLabel, hhmm, fullTime, daysAgo } from './dom.js';
 
 // ------------------------------------------------------------------ token
 function readToken() {
@@ -18,7 +21,8 @@ let TOKEN = readToken();
 const state = {
   limits: null,
   external: [],
-  sessions: new Map(),
+  sessions: new Map(), // presence live/idle/ended: these sit at desks (office.update)
+  history: new Map(), // index records from /api/sessions/list and SSE `index`: never sent to the scene
   approvals: [],
   feed: [],
   selectedId: null,
@@ -35,6 +39,13 @@ function setHTML(el, html) {
   if (lastHTML.get(el) === html) return;
   lastHTML.set(el, html);
   el.innerHTML = html;
+}
+// Same idea for content built from DOM nodes (text from transcripts goes in as text nodes only).
+function setNodes(el, sig, build) {
+  const key = `\0${sig}`;
+  if (lastHTML.get(el) === key) return;
+  lastHTML.set(el, key);
+  el.replaceChildren(...build());
 }
 const ago = (t) => {
   if (!t) return '';
@@ -139,13 +150,28 @@ function renderAssignGuide() {
   $('#assign-text').placeholder = sk ? `What should ${sk.name} do?${sk.argumentHint ? ` (arguments: ${sk.argumentHint})` : ''}` : 'e.g. Run the test suite and fix anything that fails';
 }
 
-function select(id, fly = true) {
+// History records have no desk: the camera stays where it is and Assign keeps its target.
+const narrow = () => matchMedia('(max-width: 860px)').matches;
+function select(id, fly = true, opts = {}) {
   state.selectedId = id;
-  if (fly) office.focus(id);
-  if (id && state.sessions.get(id) && isActive(state.sessions.get(id))) $('#assign-target').value = id;
+  const s = state.sessions.get(id);
+  if (fly && s && s.desk !== false) office.focus(id);
+  if (s && isActive(s)) $('#assign-target').value = id;
+  if (opts.tab) state.detailTab = opts.tab;
   document.body.classList.add('show-right');
   document.body.classList.remove('show-left');
   renderAll();
+  if (opts.focusHead && narrow()) requestAnimationFrame(() => $('#detail-head h3')?.focus());
+}
+function closeDetail() {
+  const id = state.selectedId;
+  state.selectedId = null;
+  document.body.classList.remove('show-right');
+  office.overview();
+  renderAll();
+  // Give focus back to the row that opened the detail, if it is on screen.
+  const el = leftTab === 'history' ? historyPanel.rowFor(id) : cardEls.get(id);
+  if (el?.isConnected && el.getClientRects().length) el.focus();
 }
 
 // ------------------------------------------------------------------ api
@@ -156,7 +182,7 @@ async function api(path, body) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status });
   return data;
 }
 
@@ -194,6 +220,8 @@ function renderSessions() {
   const list = sortedSessions();
   const host = $('#session-list');
   $('#session-count').textContent = list.length ? `${list.filter(isActive).length} active` : '';
+  const noDesk = list.filter((s) => s.desk === false).length; // the 42 desks are full
+  $('#desk-overflow').textContent = noDesk ? ` · +${noDesk} without a desk` : '';
   if (!list.length) {
     cardEls.clear();
     setHTML(host, `<div class="empty"><span class="big">🪑</span>The office is empty.<br>Start a Claude Code session with the hooks installed, or run <code>npm run mock</code>.</div>`);
@@ -236,33 +264,95 @@ function renderSessions() {
   for (const [id, el] of cardEls) if (!seen.has(id)) { el.remove(); cardEls.delete(id); }
 }
 
+// What the detail showed last, so a session that leaves the office (SSE `removed`) stays open as an archive.
+let lastRecord = null;
+let resumeFallback = null; // id whose resume command is shown in a text field because the clipboard failed
+const asRecord = (s) => ({
+  id: s.id, title: s.title || s.project, project: s.project, cwd: s.cwd, gitBranch: s.gitBranch || null, model: s.model,
+  presence: 'history', firstAt: s.startedAt, lastAt: s.lastAt, endedAt: s.endedAt || null,
+  counts: { prompts: s.promptCount ?? null, tools: s.toolCount ?? null, errors: s.errorCount ?? null },
+});
+const when = (t) => `${dayLabel(t)} ${hhmm(t)}`;
+function timeRange(r) {
+  const end = r.endedAt || r.lastAt;
+  if (!r.firstAt) return end ? when(end) : '';
+  if (!end) return when(r.firstAt);
+  return `${when(r.firstAt)} – ${daysAgo(r.firstAt, end) === 0 ? hhmm(end) : when(end)}`;
+}
+
+function renderArchiveHead(el, r) {
+  const sig = JSON.stringify([r.id, r.title, r.project, r.gitBranch, r.model, r.cwd, r.presence, r.firstAt, r.lastAt, r.endedAt, resumeFallback === r.id]);
+  setNodes(el, sig, () => {
+    const title = r.title || r.project || r.id;
+    const presence = r.presence && r.presence !== 'history' ? r.presence[0].toUpperCase() + r.presence.slice(1) : 'History';
+    return [h('div', { class: 'detail-head archive' },
+      h('div', { class: 'detail-title' },
+        h('h3', { tabindex: '-1', title }, title),
+        h('button', { type: 'button', class: 'icon-btn', 'data-act': 'close', 'aria-label': 'Close detail' }, '✕')),
+      h('p', { class: 'archive-line' }, h('span', { class: 'presence-tag' }, presence), timeRange(r) ? ` · ${timeRange(r)}` : ''),
+      h('p', { class: 'archive-line muted' }, [r.project, r.gitBranch, shortModel(r.model)].filter(Boolean).join(' · ')),
+      r.cwd ? h('p', { class: 'archive-line mono muted', title: r.cwd }, r.cwd) : null,
+      h('div', { class: 'detail-actions' }, h('button', { type: 'button', class: 'btn', 'data-act': 'copy-resume' }, '⧉ Copy resume command')),
+      resumeFallback === r.id ? h('input', { class: 'resume-cmd mono', readonly: true, value: `claude --resume ${r.id}`, 'aria-label': 'Resume command' }) : null)];
+  });
+}
+
+function renderArchiveStatus(el, r) {
+  const c = r.counts || {};
+  const rows = [['cwd', r.cwd], ['Branch', r.gitBranch], ['Model', r.model], ['Prompts', c.prompts], ['Tool calls', c.tools], ['Errors', c.errors],
+    ['First event', r.firstAt && fullTime(r.firstAt)], ['Last event', r.lastAt && fullTime(r.lastAt)], ['Ended', r.endedAt && fullTime(r.endedAt)], ['Session', r.id]];
+  setNodes(el, JSON.stringify(rows), () => [h('dl', { class: 'kv' },
+    rows.flatMap(([k, v]) => [h('dt', null, k), h('dd', { title: v == null ? null : String(v) }, v == null || v === '' ? '—' : String(v))]))]);
+}
+
 function renderDetail() {
-  const s = state.sessions.get(state.selectedId);
-  const el = $('#detail');
-  if (!s) {
-    setHTML(el, `<div class="panel-head"><h2>Session detail</h2></div>
-      <div class="empty"><span class="big">💜</span>Click a desk in the office, or a session in the list.</div>`);
+  const id = state.selectedId;
+  const s = id ? state.sessions.get(id) : null;
+  const rec = s || !id ? null : state.history.get(id) || (lastRecord?.id === id ? lastRecord : null);
+  if (s) lastRecord = asRecord(s);
+  else if (rec) lastRecord = rec;
+  const head = $('#detail-head'), tabsEl = $('#detail-tabs'), scroll = $('#detail-scroll');
+  const el = $('#detail-body');
+  if (!s && !rec) {
+    setHTML(head, '<div class="panel-head"><h2>Session detail</h2></div>');
+    tabsEl.hidden = true;
+    scroll.hidden = false;
+    setHTML(el, '<div class="empty"><span class="big">💜</span>Click a desk in the office, or a session in the list.</div>');
+    timeline.hide(null);
     return;
   }
+  // Archive (no desk): only Timeline and Status; Progress and Background are live-only.
+  const tabs = s ? [['progress', 'Progress'], ['background', 'Background'], ['timeline', 'Timeline'], ['status', 'Status']] : [['timeline', 'Timeline'], ['status', 'Status']];
+  const tab = tabs.some(([k]) => k === state.detailTab) ? state.detailTab : 'timeline';
+  tabsEl.hidden = false;
+  setHTML(tabsEl, tabs.map(([k, l]) => `<button role="tab" class="tab${tab === k ? ' active' : ''}" data-tab="${k}">${l}</button>`).join(''));
+  if (!s) renderArchiveHead(head, rec);
+  if (tab === 'timeline') {
+    scroll.hidden = true;
+    timeline.show(id);
+  } else {
+    timeline.hide(id);
+    scroll.hidden = false;
+  }
+  if (!s) { if (tab === 'status') renderArchiveStatus(el, rec); return; }
+
   const p = progressOf(s);
-  const tabs = [['progress', 'Progress'], ['background', 'Background'], ['trail', 'Env trail'], ['status', 'Status']];
   let body = '';
 
-  if (state.detailTab === 'progress') {
+  if (tab === 'progress') {
     body = p.total
       ? `<div class="s-row"><b>${p.done} of ${p.total} done</b><span class="muted small" style="margin-left:auto">${Math.round((p.done / p.total) * 100)}%</span></div>
          <div class="bar big"><i style="width:${(p.done / p.total) * 100}%"></i></div>
          <ul class="list" style="margin-top:10px">${p.items.map((t) => `<li><span class="check ${t.done ? 'done' : t.active ? 'active' : ''}">${t.done ? '✓' : ''}</span><div class="li-main">${esc(t.subject)}</div></li>`).join('')}</ul>`
       : `<div class="empty"><span class="big">📋</span>No task list yet.<br>Progress appears when Claude creates tasks or todos.</div>`;
-  } else if (state.detailTab === 'background') {
+  } else if (tab === 'background') {
     const bg = Object.values(s.background || {});
     const subs = Object.values(s.subagents || {});
     body = (bg.length ? `<div class="section-title">Background jobs</div><ul class="list">${bg.map((b) => `<li><span class="kind">${esc(b.type)}</span><div class="li-main">${esc(b.description || b.id)}<div class="li-sub">${esc(b.status)} · ${ago(b.since)}</div></div></li>`).join('')}</ul>` : '')
       + (subs.length ? `<div class="section-title">Subagents</div><ul class="list">${subs.map((a) => `<li><span class="check ${a.status === 'done' ? 'done' : 'active'}">${a.status === 'done' ? '✓' : ''}</span><div class="li-main"><b>${esc(a.type)}</b><div class="li-sub">${esc(a.activity)}</div></div></li>`).join('')}</ul>` : '')
       || `<div class="empty"><span class="big">⚙︎</span>No background jobs or subagents.</div>`;
-  } else if (state.detailTab === 'trail') {
-    const trail = [...(s.trail || [])].reverse();
-    body = `<ul class="list">${trail.map((e) => `<li><span class="trail-time">${clock(e.t).slice(0, 5)}</span><span class="kind ${esc(e.kind)}">${esc(e.kind)}</span><div class="li-main">${esc(e.text)}</div></li>`).join('')}</ul>`;
+  } else if (tab === 'timeline') {
+    body = null; // the Timeline owns its own element
   } else {
     body = `<dl class="kv">
         <dt>Status</dt><dd>${esc(STATUS_LABEL[s.status] || s.status)}</dd>
@@ -286,18 +376,17 @@ function renderDetail() {
       </div>`;
   }
 
-  setHTML(el, `
+  if (body !== null) setHTML(el, body);
+  setHTML(head, `
     <div class="detail-head" style="--c:var(--st-${STATUS_LABEL[s.status] ? s.status : 'idle'})">
-      <div class="detail-title"><h3 title="${esc(s.project)}">${esc(s.project)}</h3>${chip(s.status)}<button class="icon-btn" data-act="workspace" title="Open workspace: files, changes, skills" aria-label="Open workspace">🗂</button><button class="icon-btn" data-act="close" aria-label="Close detail">✕</button></div>
+      <div class="detail-title"><h3 tabindex="-1" title="${esc(s.project)}">${esc(s.project)}</h3>${chip(s.status)}<button class="icon-btn" data-act="workspace" title="Open workspace: files, changes, skills" aria-label="Open workspace">🗂</button><button class="icon-btn" data-act="close" aria-label="Close detail">✕</button></div>
       <dl class="kv">
         <dt>cwd</dt><dd title="${esc(s.cwd)}">${esc(s.cwd || '—')}</dd>
         <dt>model</dt><dd title="${esc(s.model || '')}">${esc(shortModel(s.model) || '—')}${s.effort ? ` · effort ${esc(s.effort)}` : ''}</dd>
         <dt>mode</dt><dd>${modeChip(s.permissionMode) || '—'}${s.permissionMode === 'bypassPermissions' ? ' <span class="warn">no prompts at all</span>' : ''}</dd>
         ${s.context != null || s.cost != null ? `<dt>usage</dt><dd>${s.context != null ? `context ${s.context}%` : ''}${s.context != null && s.cost != null ? ' · ' : ''}${s.cost != null ? `$${Number(s.cost).toFixed(2)}` : ''}</dd>` : ''}
       </dl>
-    </div>
-    <div class="tabs detail-tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" class="tab${state.detailTab === k ? ' active' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
-    <div class="scroll"><div class="detail-body">${body}</div></div>`);
+    </div>`);
 }
 
 function renderAsk() {
@@ -440,9 +529,47 @@ function renderAll() {
     renderLimits();
     renderGrok();
     if (document.activeElement !== $('#assign-target')) renderAssignTargets();
-    office.update([...state.sessions.values()], state.approvals, state.selectedId);
+    timeline.flush();
+    historyPanel.render();
+    // Only sessions the server gave a desk are seated (desk: false = all 42 desks are taken).
+    office.update([...state.sessions.values()].filter((s) => s.desk !== false), state.approvals, state.selectedId);
   });
 }
+
+// ------------------------------------------------------------ history + timeline
+const timeline = initTimeline({ api, store, toast, host: $('#timeline') });
+const historyPanel = initHistory({
+  api, state, ago, STATUS_LABEL,
+  host: $('#pane-history'),
+  isOpen: () => leftTab === 'history',
+  onPick: (id) => select(id, true, { tab: 'timeline', focusHead: true }),
+});
+let leftTab = store.get('office-left-tab', 'office') === 'history' ? 'history' : 'office';
+function setLeftTab(tab, focus = false) {
+  leftTab = tab;
+  store.set('office-left-tab', tab);
+  for (const b of document.querySelectorAll('[data-left]')) {
+    const on = b.dataset.left === tab;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+    b.classList.toggle('active', on);
+    if (on && focus) b.focus();
+  }
+  $('#pane-office').hidden = tab !== 'office';
+  $('#pane-history').hidden = tab !== 'history';
+  if (tab === 'history') historyPanel.activate();
+}
+$('#left-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-left]');
+  if (b) setLeftTab(b.dataset.left);
+});
+$('#left-tabs').addEventListener('keydown', (e) => {
+  const to = { ArrowLeft: 'office', Home: 'office', ArrowRight: 'history', End: 'history' }[e.key];
+  if (!to) return;
+  e.preventDefault();
+  setLeftTab(to, true);
+});
+setLeftTab(leftTab);
 
 // ------------------------------------------------------------------ dock
 function setDockTab(tab) {
@@ -471,7 +598,20 @@ $('#detail').addEventListener('click', async (e) => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (!act) return;
   const id = state.selectedId;
-  if (act === 'close') { state.selectedId = null; document.body.classList.remove('show-right'); office.overview(); renderAll(); return; }
+  if (act === 'close') { closeDetail(); return; }
+  if (act === 'copy-resume') {
+    // No `cd` in front: shells quote paths differently, so the folder is shown next to the button instead.
+    const where = lastRecord?.id === id ? lastRecord.project || lastRecord.cwd : '';
+    try {
+      await navigator.clipboard.writeText(`claude --resume ${id}`);
+      toast(`Copied. Run it in ${where || 'the project folder'}`);
+    } catch {
+      resumeFallback = id;
+      renderAll();
+      requestAnimationFrame(() => { const i = $('#detail-head .resume-cmd'); i?.focus(); i?.select(); });
+    }
+    return;
+  }
   if (act === 'workspace') { workspace.open(id, 'files'); return; }
   if (act === 'assign') { $('#assign-target').value = id; renderAssignTargets(); setDockTab('assign'); expandDock(); $('#assign-text').focus(); return; }
   try {
@@ -597,7 +737,10 @@ $('#toggle-right').addEventListener('click', () => { document.body.classList.tog
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && workspace.isOpen() && !e.target.closest('input, textarea, select')) { workspace.close(); return; }
   if (e.key === 'Escape' && !$('#time-panel').hidden) { setTimePanel(false); $('#time-btn').focus(); return; }
-  if (e.key === 'Escape' && !e.target.closest('input, textarea, select')) { state.selectedId = null; document.body.classList.remove('show-left', 'show-right'); office.overview(); renderAll(); }
+  if (e.key === 'Escape' && !e.target.closest('input, textarea, select')) { document.body.classList.remove('show-left'); closeDetail(); return; }
+  // "/" jumps to the History search while that tab is showing.
+  if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && leftTab === 'history' && !e.target.closest('input, textarea, select')
+    && $('#pane-history').getClientRects().length) { e.preventDefault(); historyPanel.focusSearch(); }
 });
 
 // ------------------------------------------------------------------ stream
@@ -622,7 +765,10 @@ function connect() {
   es.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'snapshot') {
-      state.sessions = new Map(msg.sessions.map((s) => [s.id, s]));
+      // Sent on every (re)connect: refetch what History and the Timeline already showed and merge by id.
+      state.sessions = new Map(msg.sessions.filter((s) => s.presence !== 'history').map((s) => [s.id, s]));
+      historyPanel.onReconnect();
+      timeline.onReconnect();
       state.approvals = msg.approvals;
       state.feed = msg.feed;
       state.limits = msg.limits || null;
@@ -639,8 +785,17 @@ function connect() {
       if (i >= 0) state.external[i] = msg.data; else state.external.push(msg.data);
       office.setExternal(state.external);
     } else if (msg.type === 'removed') {
+      // Left the office (presence → history): free the desk but keep the selection; the detail turns into an archive.
       state.sessions.delete(msg.id);
-      if (state.selectedId === msg.id) state.selectedId = null;
+    } else if (msg.type === 'index') {
+      historyPanel.onIndex(msg);
+      if (msg.op === 'remove' && msg.id === state.selectedId) timeline.markGone(msg.id);
+    } else if (msg.type === 'trail') {
+      timeline.onTrail(msg);
+    } else if (msg.type === 'trail-ready') {
+      timeline.onReady(msg.sessionId);
+    } else if (msg.type === 'trail-reset') {
+      timeline.onReset(msg.sessionId);
     } else if (msg.type === 'approvals') {
       const grew = msg.list.length > state.approvals.length;
       state.approvals = msg.list;
@@ -669,6 +824,6 @@ $('#gate-form').addEventListener('submit', (e) => {
 
 setInterval(tickTimers, 1000);
 setInterval(renderLimits, 30_000);
-setInterval(() => { if (state.sessions.size) renderSessions(); }, 30_000);
+setInterval(() => { if (state.sessions.size) renderSessions(); historyPanel.tick(); }, 30_000);
 renderAll();
 connect();
