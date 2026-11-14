@@ -1,6 +1,6 @@
-# Agent Office 🏢
+# Claude Code Space 🏢
 
-![Agent Office: the 3D office with sessions, limits and Ask Input](docs/screenshot.png)
+![Claude Code Space: the 3D office with sessions, limits and Ask Input](docs/screenshot.png)
 
 A 3D office that shows every Claude Code session on your machine as an agent at a desk.
 Minju's round desk sits in the middle: answer permission requests and hand out tasks from there.
@@ -40,7 +40,7 @@ Try it without real sessions:
 npm run mock
 ```
 
-Connect your real Claude Code sessions. This edits `~/.claude/settings.json` and writes a backup next to it first. It adds the hooks and the Agent Office **statusline**, which forwards model, effort, context, cost and limits to the office. If you already have a statusline, it keeps running and its output is still what you see. Add `--no-statusline` to install hooks only.
+Connect your real Claude Code sessions. This edits `~/.claude/settings.json` and writes a backup next to it first. It adds the hooks and the Claude Code Space **statusline**, which forwards model, effort, context, cost and limits to the office. If you already have a statusline, it keeps running and its output is still what you see. Add `--no-statusline` to install hooks only.
 
 ```bash
 npm run hooks:install

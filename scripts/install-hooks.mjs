@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Adds (or removes) Agent Office HTTP hooks in a Claude Code settings file.
+// Adds (or removes) Claude Code Space HTTP hooks in a Claude Code settings file.
 //
 //   node scripts/install-hooks.mjs                 # ~/.claude/settings.json (all sessions)
 //   node scripts/install-hooks.mjs --settings .claude/settings.local.json
@@ -24,7 +24,7 @@ const opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : un
 const PORT = Number(opt('--port') || process.env.AGENT_OFFICE_PORT || 7777);
 const SETTINGS = path.resolve(opt('--settings') || path.join(os.homedir(), '.claude', 'settings.json'));
 const URL = `http://127.0.0.1:${PORT}/hook`;
-const MARK = '/hook'; // every Agent Office hook points at 127.0.0.1:<port>/hook
+const MARK = '/hook'; // every Claude Code Space hook points at 127.0.0.1:<port>/hook
 
 // Event -> timeout (seconds). PermissionRequest and Stop may be held open by the
 // bridge (Ask Input / standby), so they get the long default; the rest must be quick.
@@ -62,7 +62,7 @@ try {
 }
 settings.hooks ??= {};
 
-// Remove any previous Agent Office hooks (makes install idempotent, and is the uninstall).
+// Remove any previous Claude Code Space hooks (makes install idempotent, and is the uninstall).
 for (const [event, groups] of Object.entries(settings.hooks)) {
   if (!Array.isArray(groups)) continue;
   const kept = groups
@@ -94,7 +94,7 @@ if (flag('--uninstall')) {
     try { prev = JSON.parse(fs.readFileSync(PREV_FILE, 'utf8')); } catch {}
     if (prev?.statusLine) settings.statusLine = prev.statusLine; else delete settings.statusLine;
     pendingWrites.push(() => fs.rmSync(PREV_FILE, { force: true }));
-    statuslineNote = prev?.statusLine ? '\nRestored your previous statusline.' : '\nRemoved the Agent Office statusline.';
+    statuslineNote = prev?.statusLine ? '\nRestored your previous statusline.' : '\nRemoved the Claude Code Space statusline.';
   }
 } else if (!flag('--no-statusline')) {
   if (settings.statusLine && !isOurStatusline(settings.statusLine)) {
@@ -103,7 +103,7 @@ if (flag('--uninstall')) {
       fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
       fs.writeFileSync(PREV_FILE, JSON.stringify({ statusLine: prevSl, command: prevSl.command || null }, null, 2));
     });
-    statuslineNote = '\nYour existing statusline is kept: Agent Office runs it and prints its output.';
+    statuslineNote = '\nYour existing statusline is kept: Claude Code Space runs it and prints its output.';
   }
   settings.statusLine = { type: 'command', command: OUR_COMMAND, refreshInterval: 30 };
   statuslineNote = `\nStatusline → ${OUR_COMMAND} (model, effort, 5-hour and weekly limits)${statuslineNote}`;
@@ -121,5 +121,5 @@ if (raw !== null) {
 fs.writeFileSync(SETTINGS, out);
 for (const w of pendingWrites) w();
 console.log(flag('--uninstall')
-  ? `Removed Agent Office hooks from ${SETTINGS}${statuslineNote}`
-  : `Installed ${Object.keys(EVENTS).length} Agent Office hooks → ${URL}\nin ${SETTINGS}${statuslineNote}\nNew Claude Code sessions will report to the office. Run /hooks inside a session to review them.`);
+  ? `Removed Claude Code Space hooks from ${SETTINGS}${statuslineNote}`
+  : `Installed ${Object.keys(EVENTS).length} Claude Code Space hooks → ${URL}\nin ${SETTINGS}${statuslineNote}\nNew Claude Code sessions will report to the office. Run /hooks inside a session to review them.`);

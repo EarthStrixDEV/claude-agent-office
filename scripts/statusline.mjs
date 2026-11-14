@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Claude Code statusline command for Agent Office.
+// Claude Code statusline command for Claude Code Space.
 // Claude Code pipes a JSON snapshot (model, effort, context, cost, 5-hour / 7-day limits) to stdin.
 // We forward it to the bridge, then print a status line: your previous statusline command's
 // output if you had one (saved by the installer), or a short default line.

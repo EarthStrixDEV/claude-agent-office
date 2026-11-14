@@ -1,4 +1,4 @@
-/* Agent Office: light mode follows Minju City's daytime look (white glass, ink #1E2230, accent #C8325F,
+/* Claude Code Space: light mode follows Minju City's daytime look (white glass, ink #1E2230, accent #C8325F,
    Mali + IBM Plex Sans Thai, rainbow wordmark, pill chips). Dark mode is the night office. */
 :root,
 :root[data-theme="light"] {

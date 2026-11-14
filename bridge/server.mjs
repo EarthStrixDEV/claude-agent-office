@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Agent Office Bridge
+// Claude Code Space Bridge
 // Receives Claude Code HTTP hook events, keeps a live picture of every session,
 // and streams it to the 3D dashboard over Server-Sent Events.
 // Zero runtime dependencies: Node built-ins only (three.js is served as a static file).
@@ -683,7 +683,7 @@ function settleApproval(id, behavior, message) {
   } else if (behavior === 'always') {
     body = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedPermissions: a.suggestions } } };
   } else if (behavior === 'deny') {
-    body = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: message || 'Denied from Agent Office dashboard' } } };
+    body = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: message || 'Denied from Claude Code Space dashboard' } } };
   }
   a.resolve(body);
   if (s) {
@@ -706,7 +706,7 @@ function resetFinishedTasks(s) {
 }
 
 function taskMessage(text) {
-  return `New task assigned from Minju's desk (Agent Office dashboard, sent by the user):\n\n${text}`;
+  return `New task assigned from Minju's desk (Claude Code Space dashboard, sent by the user):\n\n${text}`;
 }
 function stopBody(text) {
   return { hookSpecificOutput: { hookEventName: 'Stop', additionalContext: taskMessage(text) } };
@@ -1052,7 +1052,7 @@ server.on('error', (err) => {
   process.exit(1);
 });
 server.listen(PORT, HOST, async () => {
-  console.log(`\n  🏢 Agent Office bridge listening on http://${HOST}:${PORT}`);
+  console.log(`\n  🏢 Claude Code Space bridge listening on http://${HOST}:${PORT}`);
   console.log(`  🔑 Open the dashboard:  http://${HOST}:${PORT}/#token=${TOKEN}\n`);
   console.log(`  Hooks POST to http://${HOST}:${PORT}/hook  ·  data dir ${DATA_DIR}`);
   await startIndexer();

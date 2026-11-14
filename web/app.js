@@ -210,7 +210,7 @@ function renderStats() {
     `<div class="stat"><b>${subs}</b><span>subagents</span></div>`,
     `<div class="stat"><b>${bg}</b><span>background</span></div>`,
   ].join(''));
-  document.title = waiting ? `(${waiting}) Agent Office` : 'Agent Office';
+  document.title = waiting ? `(${waiting}) Claude Code Space` : 'Claude Code Space';
 }
 
 // Each card is a long-lived <button>: only its contents change, so a click never lands on a node
@@ -471,7 +471,7 @@ function renderLimits() {
   const five = live(L?.fiveHour), week = live(L?.sevenDay);
   let html = limitBar('5h', five) + limitBar('Week', week);
   if (!html && L?.spend?.pct != null) html = limitBar('Spend', { pct: L.spend.pct, resetsAt: L.spend.resetsAt });
-  if (!html) html = `<span class="lim-empty" title="Run npm run hooks:install to add the Agent Office statusline. Limits appear for claude.ai Pro, Max and Ultra plans after the first reply in a session.">Limits: no data yet</span>`;
+  if (!html) html = `<span class="lim-empty" title="Run npm run hooks:install to add the Claude Code Space statusline. Limits appear for claude.ai Pro, Max and Ultra plans after the first reply in a session.">Limits: no data yet</span>`;
   if (L?.hitAt && Date.now() - L.hitAt < 15 * 60_000) html += `<span class="lim-hit">Rate limited</span>`;
   setHTML($('#limits'), html);
 }
