@@ -11,7 +11,8 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import * as WS from './workspace.mjs';
-import { clip, summarizeTool } from './redact.mjs';
+import { clip, redact, summarizeTool } from './redact.mjs';
+import { Store, acquireLock, assignDesks, computePresence, decodeBefore, readJsonFile, writeAtomic } from './store.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const WEB_DIR = path.join(ROOT, 'web');
@@ -24,12 +25,31 @@ const DATA_DIR = process.env.AGENT_OFFICE_DIR || path.join(os.homedir(), '.agent
 const APPROVAL_HOLD_MS = Number(process.env.AGENT_OFFICE_APPROVAL_SECONDS || 120) * 1000;
 // How long a session on "standby" keeps its Stop hook open waiting for a task (hook timeout is 600s).
 const STANDBY_HOLD_MS = Number(process.env.AGENT_OFFICE_STANDBY_SECONDS || 540) * 1000;
+// Sessions that never had a transcript are deleted this long after they end (§6.1).
 const ENDED_TTL_MS = 24 * 60 * 60 * 1000;
-const TRAIL_MAX = 200;
 const FEED_MAX = 300;
+// Presence timers (docs/design/session-trail-store-api.md §4.2).
+const seconds = (name, def) => Number(process.env[name] || def) * 1000;
+const TIMERS = {
+  LIVE_HOOK_MS: seconds('AGENT_OFFICE_LIVE_HOOK_SECONDS', 600),             // live while hooks arrive this often
+  LIVE_TRANSCRIPT_MS: seconds('AGENT_OFFICE_LIVE_TRANSCRIPT_SECONDS', 120), // live while the transcript grows this often
+  IDLE_WINDOW_MS: seconds('AGENT_OFFICE_IDLE_SECONDS', 3600),               // after this much silence: History
+  ENDED_DESK_MS: seconds('AGENT_OFFICE_ENDED_DESK_SECONDS', 900),           // an ended session keeps its desk this long
+};
+const DESKS = 42;
+const BUILD_WAIT_MS = 10_000;
+// AGENT_OFFICE_TRANSCRIPTS=0 turns the transcript indexer off; hooks then write the whole trail.
+const TRANSCRIPTS_ON = process.env.AGENT_OFFICE_TRANSCRIPTS !== '0';
+const TRANSCRIPT_ROOT = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
 
-// ---------------------------------------------------------------- token ----
+// ----------------------------------------------------------- lock + token --
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+let lock;
+try { lock = acquireLock(DATA_DIR); } catch (e) {
+  if (e.code !== 'ELOCKED') throw e;
+  console.error(`\n  Another bridge (pid ${e.pid}) is already using ${DATA_DIR}.\n  Stop it first, or set AGENT_OFFICE_DIR to another folder. If that pid is not a bridge, delete ${e.file}.\n`);
+  process.exit(1);
+}
 const TOKEN_FILE = path.join(DATA_DIR, 'token');
 let TOKEN;
 try {
@@ -50,74 +70,105 @@ const approvals = new Map();
 const standbyWaiters = new Map();
 /** @type {Set<http.ServerResponse>} */
 const clients = new Set();
+/** @type {Set<string>} session ids that sit at one of the DESKS (§4.3) */
+let deskHolders = new Set();
 let dirty = false;
+// A failed v1 → v2 migration leaves state.json untouched and never overwrites it (§6.2 step 5).
+let stateReadOnly = false;
 
 const now = () => Date.now();
 
-function loadState() {
-  try {
-    const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    for (const s of saved.sessions || []) {
-      if (s.endedAt && now() - s.endedAt > ENDED_TTL_MS) continue;
-      // Bridge was down: we no longer know what these sessions are doing.
-      if (s.status !== 'ended') s.status = 'stale';
-      s.standby = false;
-      s.skillsUsed ??= {};
-      s.touched ??= [];
-      s.mcpUsed ??= {};
-      sessions.set(s.id, s);
-    }
-    feed.push(...(saved.feed || []).slice(-FEED_MAX));
-    if (saved.limits) limits = saved.limits;
-  } catch { /* first run */ }
+const store = new Store({ dir: DATA_DIR, liveOf: (id) => sessions.get(id) });
+
+// state.json v2 holds only sessions that are still in the office, without trails (§3.3).
+async function loadState() {
+  const saved = readJsonFile(STATE_FILE);
+  if (!saved) return;
+  let migrated = false;
+  if (!saved.v) {
+    try { await store.migrateV1(STATE_FILE, saved); migrated = true; }
+    catch (e) { stateReadOnly = true; console.warn(`  ⚠ Could not migrate state.json to v2 (${e.message}). Running read-only on the old file; a copy is in state.v1.json.bak.`); }
+  }
+  for (const s of saved.sessions || []) {
+    if (!s?.id) continue;
+    delete s.trail;
+    // Bridge was down: we no longer know what these sessions are doing. Presence stays idle until they move.
+    if (s.status !== 'ended') s.status = 'stale';
+    s.standby = false;
+    s.skillsUsed ??= {};
+    s.touched ??= [];
+    s.mcpUsed ??= {};
+    s.queue ??= [];
+    s.hookAt = 0;
+    s.transcriptAt = 0;
+    s.presence = null;
+    s.desk = false;
+    sessions.set(s.id, s);
+  }
+  feed.push(...(saved.feed || []).slice(-FEED_MAX));
+  if (saved.limits) limits = saved.limits;
+  if (migrated) dirty = true;
 }
 
+let stateSaving = Promise.resolve();
 function saveState() {
-  if (!dirty) return;
-  dirty = false;
-  const data = { sessions: [...sessions.values()], feed: feed.slice(-FEED_MAX), limits };
-  fs.writeFile(STATE_FILE, JSON.stringify(data), { mode: 0o600 }, () => {});
+  stateSaving = stateSaving.then(async () => {
+    if (!dirty || stateReadOnly) return;
+    dirty = false;
+    const data = { v: 2, sessions: [...sessions.values()], feed: feed.slice(-FEED_MAX), limits };
+    let ok = false;
+    try { ok = await writeAtomic(STATE_FILE, JSON.stringify(data)); } catch (e) { console.warn(`  state.json not saved: ${e.message}`); }
+    if (!ok) dirty = true;
+  });
+  return stateSaving;
 }
 setInterval(saveState, 5000).unref();
 
 // ------------------------------------------------------------- sessions ----
+function newSession(id, cwd) {
+  const rec = store.get(id);
+  cwd = cwd || rec?.cwd || '';
+  const s = {
+    id,
+    cwd,
+    project: cwd ? path.basename(cwd) : id.slice(0, 8),
+    model: rec?.model || null,
+    effort: null,
+    permissionMode: null,  // set by getSession from the first event
+    context: null,      // context window used %, from the statusline
+    cost: null,         // session cost in USD, from the statusline
+    skill: null,        // { name, at, active, by } — the skill in use this turn
+    skillsUsed: {},     // name -> count
+    touched: [],        // [{ p, op, at }] files the agent read or changed (newest last)
+    mcpUsed: {},        // MCP server / connector -> tool calls this session
+    status: 'idle',
+    activity: '',
+    startedAt: now(),
+    lastAt: now(),
+    endedAt: null,
+    tasks: {},          // TaskCreated / TaskCompleted
+    todos: null,        // TodoWrite fallback
+    subagents: {},
+    background: {},
+    queue: [],
+    standby: false,
+    lastMessage: '',
+    toolCount: 0,
+    errorCount: 0,
+    hookAt: 0,          // last hook event (presence)
+    transcriptAt: 0,    // last transcript growth seen by the indexer (presence)
+    presence: null,     // live | idle | ended | history (§4.2)
+    desk: false,        // server-decided seat (§4.3)
+  };
+  sessions.set(id, s);
+  return s;
+}
+
 function getSession(ev) {
   const id = ev.session_id || 'unknown';
-  let s = sessions.get(id);
-  if (!s) {
-    s = {
-      id,
-      cwd: ev.cwd || '',
-      project: ev.cwd ? path.basename(ev.cwd) : id.slice(0, 8),
-      model: null,
-      effort: null,
-      permissionMode: ev.permission_mode || null,
-      context: null,      // context window used %, from the statusline
-      cost: null,         // session cost in USD, from the statusline
-      skill: null,        // { name, at, active, by } — the skill in use this turn
-      skillsUsed: {},     // name -> count
-      touched: [],        // [{ p, op, at }] files the agent read or changed (newest last)
-      mcpUsed: {},        // MCP server / connector -> tool calls this session
-      status: 'idle',
-      activity: '',
-      startedAt: now(),
-      lastAt: now(),
-      endedAt: null,
-      tasks: {},          // TaskCreated / TaskCompleted
-      todos: null,        // TodoWrite fallback
-      subagents: {},
-      background: {},
-      trail: [],
-      queue: [],
-      standby: false,
-      lastMessage: '',
-      toolCount: 0,
-      errorCount: 0,
-    };
-    sessions.set(id, s);
-    addTrail(s, 'session', `Session joined · ${s.cwd || 'unknown dir'}`);
-  }
+  const s = sessions.get(id) || newSession(id, ev.cwd);
   s.lastAt = now();
+  store.noteLive(id, { cwd: ev.cwd, model: s.model, transcript: ev.transcript_path, at: s.lastAt });
   const effort = ev.effort?.level;
   if (effort && effort !== s.effort) {
     if (s.effort) addTrail(s, 'env', `Effort → ${effort}`);
@@ -128,7 +179,11 @@ function getSession(ev) {
     s.permissionMode = ev.permission_mode;
   }
   if (s.status === 'stale' || s.status === 'ended') {
-    if (ev.hook_event_name !== 'SessionEnd') { s.status = 'idle'; s.endedAt = null; }
+    if (ev.hook_event_name !== 'SessionEnd') {
+      s.status = 'idle';
+      s.endedAt = null;
+      store.patch(s.id, { endedAt: null, endReason: null });
+    }
   }
   return s;
 }
@@ -138,7 +193,7 @@ function useSkill(s, name, by) {
   name = String(name).replace(/^\//, '').slice(0, 80);
   s.skill = { name, at: now(), active: true, by };
   s.skillsUsed[name] = (s.skillsUsed[name] || 0) + 1;
-  addTrail(s, 'skill', `${by === 'user' ? 'Ran' : 'Using'} skill ${name}`);
+  fallbackTrail(s, 'skill', `${by === 'user' ? 'Ran' : 'Using'} skill ${name}`);
   pushFeed(s, 'skill', `🧩 ${name}`);
 }
 const FILE_OPS = { Read: 'read', Edit: 'edit', MultiEdit: 'edit', Write: 'write', NotebookEdit: 'edit' };
@@ -153,9 +208,17 @@ function touchFile(s, tool, input) {
   if (s.touched.length > 80) s.touched.splice(0, s.touched.length - 80);
 }
 
-function addTrail(s, kind, text) {
-  s.trail.push({ t: now(), kind, text: clip(text, 200) });
-  if (s.trail.length > TRAIL_MAX) s.trail.splice(0, s.trail.length - TRAIL_MAX);
+// Trail entries the hooks ('hook') or the bridge itself ('bridge') own (§3.1). Ids are h:/b:<ts36>-<n>.
+let trailSeq = 0;
+function addTrail(s, kind, text, src = 'hook') {
+  const t = now();
+  const entry = { id: `${src[0]}:${t.toString(36)}-${(trailSeq++).toString(36)}`, t, kind, src, text: clip(text, 200) };
+  store.append(s.id, [entry]).catch((e) => console.warn(`  trail ${s.id}: ${e.message}`));
+}
+// Kinds the transcript owns (prompt, skill, subagent, tool errors, background/git tool calls):
+// written by the hook only while there is no healthy indexer (degraded mode, §3.2 rule 4).
+function fallbackTrail(s, kind, text) {
+  if (store.degraded) addTrail(s, kind, text, 'hook');
 }
 
 function pushFeed(s, kind, text) {
@@ -165,9 +228,10 @@ function pushFeed(s, kind, text) {
   broadcast({ type: 'feed', entry });
 }
 
+// No trail in here any more: the timeline comes from /api/sessions/trail + SSE 'trail' (§5.3).
 function publicSession(s) {
-  const { queue, ...rest } = s;
-  return { ...rest, queued: queue.length, waitingForTask: standbyWaiters.has(s.id) };
+  const { queue, hookAt, transcriptAt, ...rest } = s;
+  return { ...rest, title: store.get(s.id)?.title || null, queued: queue.length, waitingForTask: standbyWaiters.has(s.id) };
 }
 
 function publicApproval(a) {
@@ -210,8 +274,98 @@ function modelFromTranscript(file) {
 
 function touch(s) {
   dirty = true;
-  broadcast({ type: 'session', session: publicSession(s) });
+  const changed = evaluate();
+  if (!changed.has(s) && sessions.has(s.id)) broadcast({ type: 'session', session: publicSession(s) });
 }
+
+// ------------------------------------------------------ presence + desks ----
+const hasApproval = (id) => [...approvals.values()].some((a) => a.sessionId === id);
+// Pinned sessions stay live however quiet they are (§4.2). A restored 'stale' one is not pinned.
+function pinned(s) {
+  if (s.status === 'stale') return false;
+  return hasApproval(s.id) || standbyWaiters.has(s.id) || ['waiting', 'working', 'compacting'].includes(s.status)
+    || Object.values(s.background || {}).some((b) => b.status === 'running');
+}
+
+// Recompute presence and desks for every session in the office; broadcast whoever changed.
+// Sessions that reach 'history' leave the office (SSE 'removed'); their record stays in the index.
+function evaluate() {
+  const t = now();
+  const changed = new Set();
+  for (const s of sessions.values()) {
+    const p = computePresence(s, t, pinned(s), TIMERS);
+    if (p !== s.presence) { s.presence = p; changed.add(s); }
+  }
+  const list = [...sessions.values()].map((s) => ({
+    id: s.id, presence: s.presence, lastAt: s.lastAt,
+    urgent: hasApproval(s.id) || s.status === 'waiting' || s.status === 'error',
+  }));
+  deskHolders = assignDesks(deskHolders, list, DESKS);
+  for (const s of sessions.values()) {
+    const desk = deskHolders.has(s.id);
+    if (desk !== s.desk) { s.desk = desk; changed.add(s); }
+    store.patch(s.id, { waiting: hasApproval(s.id) || s.status === 'waiting' });
+  }
+  for (const s of changed) {
+    if (s.presence === 'history') retire(s);
+    else { broadcast({ type: 'session', session: publicSession(s) }); store.emit('record', s.id); }
+  }
+  if (changed.size) dirty = true;
+  return changed;
+}
+
+function retire(s) {
+  sessions.delete(s.id);
+  deskHolders.delete(s.id);
+  releaseStandby(s.id);
+  dirty = true;
+  broadcast({ type: 'removed', id: s.id });
+  store.retired(s.id).catch((e) => console.warn(`  trail ${s.id}: ${e.message}`));
+}
+
+// The indexer saw this transcript grow. Recent activity brings the session (back) into the office.
+store.on('activity', (id, at) => {
+  if (now() - at >= TIMERS.IDLE_WINDOW_MS) return;
+  let s = sessions.get(id);
+  if (!s) {
+    if (store.get(id)?.endedAt) return;
+    s = newSession(id);
+    s.lastAt = at;
+  }
+  s.transcriptAt = Math.max(s.transcriptAt || 0, at);
+  s.lastAt = Math.max(s.lastAt || 0, at);
+  touch(s);
+});
+
+// ------------------------------------------------------- trail + index SSE ----
+// 'trail' batches every 250 ms; 'index' upserts at most once a second per session (§5.3).
+const pendingTrail = new Map();
+let trailTimer = null;
+store.on('append', (id, entries) => {
+  if (!pendingTrail.has(id)) pendingTrail.set(id, []);
+  pendingTrail.get(id).push(...entries);
+  trailTimer ??= setTimeout(() => {
+    trailTimer = null;
+    for (const [sessionId, list] of pendingTrail) broadcast({ type: 'trail', sessionId, entries: list });
+    pendingTrail.clear();
+  }, 250);
+});
+store.on('trail-reset', (id) => { pendingTrail.delete(id); broadcast({ type: 'trail-reset', sessionId: id }); });
+store.on('trail-ready', (id) => broadcast({ type: 'trail-ready', sessionId: id }));
+
+const pendingIndex = new Set();
+let indexTimer = null;
+store.on('record', (id) => {
+  pendingIndex.add(id);
+  indexTimer ??= setTimeout(() => {
+    indexTimer = null;
+    for (const rid of pendingIndex) {
+      const rec = store.get(rid);
+      broadcast(rec ? { type: 'index', op: 'upsert', record: store.publicRecord(rec) } : { type: 'index', op: 'remove', id: rid });
+    }
+    pendingIndex.clear();
+  }, 1000);
+});
 
 function broadcastApprovals() {
   broadcast({ type: 'approvals', list: [...approvals.values()].map(publicApproval) });
@@ -318,6 +472,7 @@ async function triggerRoutine(source, routineId, text) {
 function handleHook(ev, req) {
   const name = ev.hook_event_name;
   const s = getSession(ev);
+  s.hookAt = now();
   const sub = ev.agent_id && s.subagents[ev.agent_id];
   const who = sub ? `${sub.type || 'subagent'}` : null;
 
@@ -329,6 +484,9 @@ function handleHook(ev, req) {
       s.activity = `Session ${ev.source || 'start'}`;
       addTrail(s, 'session', `Session ${ev.source || 'start'}${s.model ? ` · ${s.model}` : ''} · ${ev.cwd || ''}`);
       pushFeed(s, 'session', `Session ${ev.source || 'started'}`);
+      if (ev.transcript_path && !store.degraded) {
+        try { store.indexer.track?.(s.id, ev.transcript_path); } catch (e) { console.warn(`  indexer.track: ${e.message}`); }
+      }
       break;
     }
     case 'SessionEnd': {
@@ -337,6 +495,7 @@ function handleHook(ev, req) {
       s.activity = `Ended (${ev.reason || 'exit'})`;
       s.background = {};
       releaseStandby(s.id);
+      store.patch(s.id, { endedAt: s.endedAt, endReason: clip(ev.reason || 'exit', 40) });
       addTrail(s, 'session', `Session ended · ${ev.reason || 'exit'}`);
       pushFeed(s, 'session', 'Session ended');
       break;
@@ -345,7 +504,8 @@ function handleHook(ev, req) {
       s.status = 'thinking';
       s.activity = 'Thinking…';
       resetFinishedTasks(s);
-      addTrail(s, 'prompt', `Prompt: ${clip(ev.prompt, 120)}`);
+      fallbackTrail(s, 'prompt', `Prompt: ${clip(ev.prompt, 120)}`);
+      if (store.degraded) store.patch(s.id, { lastPrompt: clip(ev.prompt, 80) });
       { const m = String(ev.prompt || '').match(/^\/([\w:.-]+)/); if (m) useSkill(s, m[1], 'user'); }
       pushFeed(s, 'prompt', 'New prompt');
       break;
@@ -366,10 +526,10 @@ function handleHook(ev, req) {
           id, type: ev.tool_name === 'Bash' ? 'shell' : 'subagent',
           description: summary, status: 'running', since: now(),
         };
-        addTrail(s, 'background', `Background ${ev.tool_name}: ${summary}`);
+        fallbackTrail(s, 'background', `Background ${ev.tool_name}: ${summary}`);
       }
       if (ev.tool_name === 'Bash' && /^\s*(git\s+(checkout|switch)|cd)\b/.test(ev.tool_input?.command || '')) {
-        addTrail(s, 'env', clip(ev.tool_input.command, 120));
+        fallbackTrail(s, 'env', clip(ev.tool_input.command, 120));
       }
       pushFeed(s, 'tool', who ? `${who} › ${label}` : label);
       break;
@@ -383,7 +543,7 @@ function handleHook(ev, req) {
     }
     case 'PostToolUseFailure': {
       s.errorCount++;
-      addTrail(s, 'error', `${ev.tool_name} failed${ev.error ? `: ${clip(ev.error, 120)}` : ''}`);
+      fallbackTrail(s, 'error', `${ev.tool_name} failed${ev.error ? `: ${clip(ev.error, 120)}` : ''}`);
       pushFeed(s, 'error', `${ev.tool_name} failed`);
       break;
     }
@@ -414,7 +574,7 @@ function handleHook(ev, req) {
     }
     case 'SubagentStart': {
       s.subagents[ev.agent_id] = { id: ev.agent_id, type: ev.agent_type || 'subagent', status: 'working', activity: 'Starting…', startedAt: now(), lastAt: now() };
-      addTrail(s, 'subagent', `Subagent started: ${ev.agent_type || ev.agent_id}`);
+      fallbackTrail(s, 'subagent', `Subagent started: ${ev.agent_type || ev.agent_id}`);
       pushFeed(s, 'subagent', `Hired ${ev.agent_type || 'subagent'}`);
       break;
     }
@@ -424,7 +584,7 @@ function handleHook(ev, req) {
       a.status = 'done';
       a.endedAt = now();
       a.activity = clip(ev.last_assistant_message || 'Done', 120);
-      addTrail(s, 'subagent', `Subagent finished: ${a.type}`);
+      fallbackTrail(s, 'subagent', `Subagent finished: ${a.type}`);
       pushFeed(s, 'subagent', `${a.type} finished`);
       setTimeout(() => { delete s.subagents[ev.agent_id]; touch(s); }, 90_000).unref();
       break;
@@ -472,7 +632,7 @@ function handleHook(ev, req) {
 // --------------------------------------------------------- Ask Input ------
 function holdForApproval(s, ev, req) {
   const summary = summarizeTool(ev.tool_name, ev.tool_input);
-  addTrail(s, 'permission', `Permission asked: ${ev.tool_name}${summary ? ` · ${summary}` : ''}`);
+  addTrail(s, 'permission', `Permission asked: ${ev.tool_name}${summary ? ` · ${summary}` : ''}`, 'bridge');
 
   // Nobody is watching the dashboard: let Claude Code show its normal prompt right away.
   if (clients.size === 0) {
@@ -528,7 +688,7 @@ function settleApproval(id, behavior, message) {
   a.resolve(body);
   if (s) {
     const label = behavior === 'terminal' ? `Passed to terminal (${message || 'manual'})` : behavior === 'allow' ? 'Allowed' : behavior === 'always' ? `Always allowed (${a.always || 'suggested rule'})` : 'Denied';
-    addTrail(s, 'permission', `${label}: ${a.tool}`);
+    addTrail(s, 'permission', `${label}: ${a.tool}`, 'bridge');
     pushFeed(s, 'permission', `${label} · ${a.tool}`);
     s.status = behavior === 'terminal' ? 'waiting' : behavior === 'deny' ? 'thinking' : 'working';
     touch(s);
@@ -572,7 +732,7 @@ function handleStop(s, ev, req) {
     resetFinishedTasks(s);
     s.status = 'thinking';
     s.activity = 'Picked up a task from Minju';
-    addTrail(s, 'dispatch', `Delivered task: ${task.text}`);
+    addTrail(s, 'dispatch', `Delivered task: ${task.text}`, 'bridge');
     pushFeed(s, 'dispatch', `Picked up: ${task.text}`);
     touch(s);
     return stopBody(task.text);
@@ -622,13 +782,13 @@ function dispatch(sessionId, text, skill) {
     resetFinishedTasks(s);
     s.status = 'thinking';
     s.activity = 'Picked up a task from Minju';
-    addTrail(s, 'dispatch', `Delivered task: ${text}`);
+    addTrail(s, 'dispatch', `Delivered task: ${text}`, 'bridge');
     pushFeed(s, 'dispatch', `Picked up: ${text}`);
     touch(s);
     return { ok: true, delivered: true };
   }
   s.queue.push({ text, at: now() });
-  addTrail(s, 'dispatch', `Queued task: ${text}`);
+  addTrail(s, 'dispatch', `Queued task: ${text}`, 'bridge');
   pushFeed(s, 'dispatch', `Queued: ${text}`);
   touch(s);
   return { ok: true, delivered: false, queued: s.queue.length };
@@ -708,7 +868,10 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, {});
     }
 
-    if (p === '/health') return send(res, 200, { ok: true, sessions: sessions.size, viewers: clients.size });
+    if (p === '/health') {
+      const transcripts = !store.indexer ? 'off' : store.healthy ? 'ok' : 'degraded';
+      return send(res, 200, { ok: true, sessions: sessions.size, viewers: clients.size, transcripts, transcriptsReason: store.healthReason });
+    }
 
     // ---- Dashboard (token required) ---------------------------------------
     if (p === '/events' && req.method === 'GET') {
@@ -717,6 +880,7 @@ const server = http.createServer(async (req, res) => {
       res.write(`data: ${JSON.stringify({
         type: 'snapshot',
         sessions: [...sessions.values()].map(publicSession),
+        indexTotal: store.list({ limit: 1 }).total,
         approvals: [...approvals.values()].map(publicApproval),
         feed: feed.slice(-60),
         limits,
@@ -738,6 +902,21 @@ const server = http.createServer(async (req, res) => {
       if (origin && !ALLOWED_ORIGINS.has(origin)) return send(res, 403, { error: 'bad origin' });
       if (!safeEqual(req.headers['x-office-token'], TOKEN)) return send(res, 401, { error: 'bad token' });
       const body = await readJson(req, 100_000);
+
+      // ---- Session Trail (§5.2) --------------------------------------------
+      if (p === '/api/sessions/list') return send(res, 200, store.list(body));
+      if (p === '/api/sessions/trail') {
+        const id = String(body.sessionId || '');
+        if (!store.get(id)) return send(res, 404, { error: 'no such session' });
+        const limit = Math.min(500, Math.max(1, Math.floor(Number(body.limit)) || 200));
+        const kinds = Array.isArray(body.kinds) && body.kinds.length ? new Set(body.kinds.map(String)) : null;
+        let before = null;
+        if (body.before != null) { before = decodeBefore(body.before); if (before == null) return send(res, 400, { error: 'bad before' }); }
+        if (!store.get(id).trailBuilt && !(await store.buildFor(id, BUILD_WAIT_MS))) {
+          return send(res, 200, { entries: [], before: null, building: true });
+        }
+        return send(res, 200, { ...store.readPage(id, { before, limit, kinds }), building: false });
+      }
 
       const ext = p.match(/^\/api\/external\/([a-z0-9-]{1,32})(\/trigger)?$/);
       if (ext && !ext[2]) { ingestExternal(ext[1], body); return send(res, 200, { ok: true }); }
@@ -763,7 +942,7 @@ const server = http.createServer(async (req, res) => {
         if (p === '/api/ws/market/install') {
           try {
             const out = await WS.installPlugin(String(body.id || ''));
-            if (sess) { addTrail(sess, 'env', `Installed plugin ${body.id}`); touch(sess); }
+            if (sess) { addTrail(sess, 'env', `Installed plugin ${body.id}`, 'bridge'); touch(sess); }
             return send(res, 200, { ok: true, output: clip(out, 300) });
           } catch (e) { return send(res, 400, { error: clip(e.message, 300) }); }
         }
@@ -780,14 +959,14 @@ const server = http.createServer(async (req, res) => {
           if (p === '/api/ws/git/switch' || p === '/api/ws/git/branch') {
             const name = String(body.name || '');
             if (p.endsWith('switch')) await WS.gitSwitch(cwd, name); else await WS.gitCreateBranch(cwd, name);
-            addTrail(sess, 'git', `${p.endsWith('switch') ? 'Switched to' : 'Created'} branch ${name} from the dashboard`);
+            addTrail(sess, 'git', `${p.endsWith('switch') ? 'Switched to' : 'Created'} branch ${name} from the dashboard`, 'bridge');
             touch(sess);
             return send(res, 200, { ok: true });
           }
           if (p === '/api/ws/git/unstage') { await WS.gitUnstage(cwd, body.paths); return send(res, 200, { ok: true }); }
           if (p === '/api/ws/git/commit') {
             const summary = await WS.gitCommit(cwd, body.message);
-            addTrail(sess, 'git', `Committed from the dashboard: ${summary}`);
+            addTrail(sess, 'git', `Committed from the dashboard: ${summary}`, 'bridge');
             pushFeed(sess, 'git', `Committed: ${clip(body.message, 80)}`);
             touch(sess);
             return send(res, 200, { ok: true, summary });
@@ -809,19 +988,20 @@ const server = http.createServer(async (req, res) => {
         const s = sessions.get(body.sessionId);
         if (!s) return send(res, 404, { error: 'no session' });
         s.standby = !!body.on;
-        addTrail(s, 'dispatch', s.standby ? 'Standby on' : 'Standby off');
+        addTrail(s, 'dispatch', s.standby ? 'Standby on' : 'Standby off', 'bridge');
         if (!s.standby) releaseStandby(s.id);
         touch(s);
         return send(res, 200, { ok: true });
       }
+      // Forget = leave the office only (D2): the record and trail stay in History.
       if (p === '/api/forget') {
         const s = sessions.get(body.sessionId);
-        if (s) { releaseStandby(s.id); sessions.delete(s.id); dirty = true; broadcast({ type: 'removed', id: s.id }); }
+        if (s) { s.presence = 'history'; retire(s); evaluate(); }
         return send(res, 200, { ok: true });
       }
       if (p === '/api/clear-queue') {
         const s = sessions.get(body.sessionId);
-        if (s) { s.queue = []; addTrail(s, 'dispatch', 'Queue cleared'); touch(s); }
+        if (s) { s.queue = []; addTrail(s, 'dispatch', 'Queue cleared', 'bridge'); touch(s); }
         return send(res, 200, { ok: true });
       }
       return send(res, 404, { error: 'unknown api' });
@@ -842,32 +1022,55 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 0;
 server.headersTimeout = 30_000;
 
-// Sweep long-ended sessions.
+// Presence sweep (§4.2) and the 24 h rule for sessions without a transcript (§6.1).
 setInterval(() => {
-  for (const s of sessions.values()) {
-    if (s.endedAt && now() - s.endedAt > ENDED_TTL_MS) { sessions.delete(s.id); broadcast({ type: 'removed', id: s.id }); dirty = true; }
-  }
+  evaluate();
+  store.expireHookOnly(now(), ENDED_TTL_MS);
 }, 60_000).unref();
 
-loadState();
+// The indexer is optional: missing, broken or switched off → degraded mode (hooks write the whole trail).
+async function startIndexer() {
+  if (!TRANSCRIPTS_ON) { console.log('  Transcript indexer off (AGENT_OFFICE_TRANSCRIPTS=0): hooks write the whole trail.'); return; }
+  try {
+    const { createIndexer } = await import('./transcripts.mjs');
+    store.attachIndexer(createIndexer({ root: TRANSCRIPT_ROOT, redactor: { clip, redact, summarizeTool }, log: console }));
+  } catch (e) {
+    store.indexer = null;
+    console.warn(`  Transcript indexer unavailable (${e.code || e.message}): hooks write the whole trail.`);
+  }
+}
+
+// Start order (§6.3): lock (above) → index → state (+ v1 migration) → listen → indexer → reconcile.
+store.load();
+await loadState();
+evaluate();
+if (dirty) await saveState();
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') console.error(`\n  Port ${PORT} is already in use. Is the bridge already running? Set AGENT_OFFICE_PORT to use another port.\n`);
   else console.error(err);
+  lock.release();
   process.exit(1);
 });
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
   console.log(`\n  🏢 Agent Office bridge listening on http://${HOST}:${PORT}`);
   console.log(`  🔑 Open the dashboard:  http://${HOST}:${PORT}/#token=${TOKEN}\n`);
   console.log(`  Hooks POST to http://${HOST}:${PORT}/hook  ·  data dir ${DATA_DIR}`);
+  await startIndexer();
+  store.reconcile();
 });
 
-function shutdown() {
+let stopping = false;
+async function shutdown() {
+  if (stopping) return;
+  stopping = true;
   for (const id of [...approvals.keys()]) settleApproval(id, 'terminal', 'bridge stopping');
   for (const id of [...standbyWaiters.keys()]) releaseStandby(id);
-  try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ sessions: [...sessions.values()], feed: feed.slice(-FEED_MAX), limits }), { mode: 0o600 });
-  } catch {}
+  try { await store.indexer?.stop?.(); } catch { /* best effort */ }
+  dirty = true;
+  await Promise.allSettled([saveState(), store.flush()]);
+  lock.release();
   setTimeout(() => process.exit(0), 100);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+process.on('exit', () => lock.release());

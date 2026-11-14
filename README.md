@@ -15,7 +15,7 @@ The office is a Minju City-style island floating in orbit: terrazzo floor, a gar
 
 All settings are remembered in this browser.
 
-It is fed by **Claude Code HTTP hooks**: no SDK, no polling, no transcript parsing.
+It is fed by **Claude Code HTTP hooks**: no SDK, no polling. The **Session Trail** (every session's timeline and the History list) also reads Claude Code's own transcript files under `~/.claude/projects/`, read-only, so it can show tool calls one by one and sessions from before the bridge was running. Set `AGENT_OFFICE_TRANSCRIPTS=0` to turn that off; hooks then write the trail on their own.
 
 ```
 Claude Code (Desktop / CLI) ──http hooks──▶ Bridge 127.0.0.1:7777 ──SSE──▶ 3D dashboard
@@ -79,13 +79,14 @@ Open it from a session's detail panel (🗂 or **Open workspace**), or click the
 
 ## What each panel reads
 
-| Panel | Hook events |
+| Panel | Source |
 |---|---|
 | Progress bar / floor ring | `TaskCreated`, `TaskCompleted` (falls back to `TodoWrite`) |
-| Current sessions / desks | `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `Stop` |
+| Current sessions / desks | `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `Stop`. The bridge decides who gets one of the 42 desks: a session is *live* while hooks arrive (or its transcript grows), *idle* after 10 quiet minutes, and moves to History after 60; an ended session keeps its desk for 15 minutes |
+| History | `~/.agent-office/index.json`: every session the hooks or the transcript reader have seen, with title, project, branch, model and counts |
+| Session trail (timeline) | Transcript: prompts, each tool call, skills, subagents, tool errors. Hooks: session start/end, cwd, model, effort and permission-mode changes, compaction, notifications, API errors. Bridge: permissions, dispatched tasks, git and plugin actions from the dashboard. Without the transcript reader, hooks also write prompts, skills, subagents and tool errors |
 | Subagent mini-desks | `SubagentStart`, `SubagentStop` |
 | Background process (server tower) | `PreToolUse` with `run_in_background`, then the authoritative `background_tasks` list on `Stop` |
-| Environment trail | `SessionStart`, `CwdChanged`, `PreCompact`/`PostCompact`, `PostModelSwitch`, permission-mode changes |
 | Status | latest of `PreToolUse`, `PostToolUseFailure`, `Notification`, `StopFailure` |
 | Model / effort | `SessionStart.model`, `effort.level` on tool events, the statusline JSON (and, as a fallback, the newest model named in the transcript) |
 | Permission mode | `permission_mode`, present on every event |
@@ -138,12 +139,23 @@ Grok Bot has no status API, so the office can't read your Bots by itself. Two pi
 | Env var | Default | |
 |---|---|---|
 | `AGENT_OFFICE_PORT` | `7777` | Also pass `--port` to the hook installer |
-| `AGENT_OFFICE_DIR` | `~/.agent-office` | Token and state snapshot |
+| `AGENT_OFFICE_DIR` | `~/.agent-office` | Token, live state, session index (`index.json`) and timelines (`trails/`). One bridge per folder (`bridge.lock`) |
 | `AGENT_OFFICE_APPROVAL_SECONDS` | `120` | Hold time before handing a permission back to Claude |
 | `AGENT_OFFICE_STANDBY_SECONDS` | `540` | Must stay under the `Stop` hook timeout (600) |
+| `AGENT_OFFICE_TRANSCRIPTS` | on | `0` stops reading transcripts; hooks write the whole trail and History holds only sessions the hooks saw |
+| `AGENT_OFFICE_LIVE_HOOK_SECONDS` | `600` | A session stays *live* this long after its last hook |
+| `AGENT_OFFICE_LIVE_TRANSCRIPT_SECONDS` | `120` | …or this long after its transcript last grew |
+| `AGENT_OFFICE_IDLE_SECONDS` | `3600` | Silence after which a session leaves its desk for History |
+| `AGENT_OFFICE_ENDED_DESK_SECONDS` | `900` | How long an ended session keeps its desk |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Where the transcripts are read from (`<dir>/projects`) |
 
 ## Known limits
 
 - Cloud sessions (claude.ai/code) can't reach `127.0.0.1` on your machine.
 - A queued task can't reach a session that is idle and not on standby until its next turn ends.
 - If the bridge isn't running, hooks fail as non-blocking errors and Claude carries on. Uninstall the hooks when you don't use the office.
+- While the bridge is down, events only hooks report are lost: notifications, permissions answered in the terminal, compaction and `SessionEnd`. Prompts and tool calls are caught up from the transcript. A session whose `SessionEnd` was missed moves to History after 60 quiet minutes.
+- Sessions the hooks never saw (before you installed them, or while the bridge was off) have only the transcript side of the trail: no start/end, cwd, model, mode, compaction or notification entries.
+- A session's index record and trail are deleted when Claude Code deletes its transcript (`cleanupPeriodDays`), including the office's own permission, dispatch and git entries. Sessions with no transcript at all are kept 24 hours after they end.
+- The transcript format is internal to Claude Code. If the reader stops understanding it, the bridge falls back to hook-written trails (see `/health`).
+- With all 42 desks taken by live sessions, extra sessions get no desk and are listed as "+N without a desk".
