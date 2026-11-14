@@ -6,7 +6,8 @@ const PAGE = 200;
 const SEARCH_MS = 150;
 const norm = (s) => String(s ?? '').normalize('NFC').toLocaleLowerCase();
 // The list API hides sessions nobody typed in; do the same for records that arrive over SSE.
-const listed = (r) => !(r.counts && r.counts.prompts === 0);
+// The server decides (`empty`): an unbuilt record can report 0 prompts before its count is known.
+const listed = (r) => !r.empty;
 const byLast = (a, b) => (b.lastAt || 0) - (a.lastAt || 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 const PRESENCE = { live: '●', idle: '○', ended: '✓', history: '' };
 

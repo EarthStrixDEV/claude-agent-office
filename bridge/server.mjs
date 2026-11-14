@@ -11,7 +11,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import * as WS from './workspace.mjs';
-import { clip, redact, summarizeTool } from './redact.mjs';
+import { clip, summarizeTool } from './redact.mjs';
 import { Store, acquireLock, assignDesks, computePresence, decodeBefore, readJsonFile, writeAtomic } from './store.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -1033,7 +1033,7 @@ async function startIndexer() {
   if (!TRANSCRIPTS_ON) { console.log('  Transcript indexer off (AGENT_OFFICE_TRANSCRIPTS=0): hooks write the whole trail.'); return; }
   try {
     const { createIndexer } = await import('./transcripts.mjs');
-    store.attachIndexer(createIndexer({ root: TRANSCRIPT_ROOT, redactor: { clip, redact, summarizeTool }, log: console }));
+    store.attachIndexer(createIndexer({ root: TRANSCRIPT_ROOT, log: console }));
   } catch (e) {
     store.indexer = null;
     console.warn(`  Transcript indexer unavailable (${e.code || e.message}): hooks write the whole trail.`);

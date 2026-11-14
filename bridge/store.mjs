@@ -247,6 +247,7 @@ export class Store extends EventEmitter {
       presence: live?.presence || 'history', status: live?.status ?? null, waiting: !!rec.waiting,
       forkedFrom: rec.forkedFrom, titleSrc: rec.titleSrc, lastPrompt: rec.lastPrompt,
       firstAt: rec.firstAt, lastAt: rec.lastAt, endedAt: rec.endedAt, counts,
+      empty: this.isEmpty(rec),
     };
   }
 
